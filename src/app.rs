@@ -658,7 +658,7 @@ impl VexApp {
         let x_of = |v: usize| text_x0 + v as f32 * char_w - scroll_x;
         let text_painter = painter.with_clip_rect(text_rect);
         let selection = vim.selection(buf);
-        let search = vim.search.clone().filter(|s| vim.highlight_search && !s.is_empty());
+        let search = vim.highlight_regex();
         let lang = syntax::lang_for(&buf.extension());
 
         // Block-comment state at the first visible line.
@@ -691,11 +691,10 @@ impl VexApp {
                     text_painter.rect_filled(Rect::from_x_y_ranges(x0..=x1, y..=y + line_h), 0.0, theme::SELECTION);
                 }
             }
-            if let Some(pat) = &search {
-                let n = pat.chars().count();
-                for c in vim::search_matches(line, pat) {
+            if let Some(re) = &search {
+                for (s, e) in vim::search_matches(line, re) {
                     let r = Rect::from_x_y_ranges(
-                        x_of(buf.visual_col(l, c))..=x_of(buf.visual_col(l, c + n)),
+                        x_of(buf.visual_col(l, s))..=x_of(buf.visual_col(l, e)),
                         y + 1.0..=y + line_h - 1.0,
                     );
                     text_painter.rect_filled(r, 2.0, theme::SEARCH_MATCH);

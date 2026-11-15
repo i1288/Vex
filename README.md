@@ -33,7 +33,7 @@ The status bar badge shows the current mode: **NORMAL**, **INSERT**, **VISUAL** 
 | `p P` | paste after / before |
 | `u` / `Ctrl-r` | undo / redo |
 | `.` | repeat last change |
-| `/ ?` `n N` `* #` | search |
+| `/ ?` `n N` `* #` | search (regex, smartcase) |
 | `v V` | visual / visual line |
 | `gt gT` | next / previous tab |
 | counts | `3dw`, `5j`, `2dd` … |
@@ -45,7 +45,7 @@ The status bar badge shows the current mode: **NORMAL**, **INSERT**, **VISUAL** 
 | `:qa` `:qa!` `:wqa` | quit all |
 | `:e <file>` | open file |
 | `:N` | go to line N |
-| `:s/a/b/g` `:%s/a/b/g` | replace (literal text) |
+| `:s/a/b/g` `:%s/a/b/gi` | replace (regex; `$1`/`\1` groups, `\n` splits lines) |
 | `:noh` | clear search highlight |
 | `:bn` `:bp` | next / previous tab |
 
@@ -75,3 +75,5 @@ src/
 ```
 
 Run the tests with `cargo test`.
+
+Patterns use Rust [regex syntax](https://docs.rs/regex/latest/regex/#syntax). A pattern that isn't valid regex is matched as plain text, so `/f(` still works.

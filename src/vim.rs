@@ -1,6 +1,8 @@
 //! Modal (vim-style) editing engine. Independent of the GUI: the app feeds it
 //! `Key`s and acts on the `Action`s it returns.
 
+use regex::{Regex, RegexBuilder};
+
 use crate::buffer::{Buffer, Pos};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,6 +121,7 @@ pub struct Vim {
     pub message: Option<String>,
     pub message_is_error: bool,
     pub search: Option<String>,
+    search_re: Option<(String, Regex)>,
     pub highlight_search: bool,
     pub search_backward: bool,
     pub visual_anchor: Pos,
@@ -145,6 +148,7 @@ impl Default for Vim {
             message: None,
             message_is_error: false,
             search: None,
+            search_re: None,
             highlight_search: false,
             search_backward: false,
             visual_anchor: Pos::default(),
@@ -528,27 +532,67 @@ fn match_pair(buf: &Buffer, from: Pos) -> Option<Pos> {
     None
 }
 
-/// All match columns of `pat` in `line`; case-insensitive unless `pat` has uppercase.
-fn find_matches(line: &[char], pat: &[char]) -> Vec<usize> {
-    if pat.is_empty() || pat.len() > line.len() {
-        return Vec::new();
-    }
-    let fold = !pat.iter().any(|c| c.is_uppercase());
-    let eq = |a: char, b: char| {
-        if fold {
-            a.to_lowercase().eq(b.to_lowercase())
-        } else {
-            a == b
-        }
-    };
-    (0..=line.len() - pat.len())
-        .filter(|&i| pat.iter().enumerate().all(|(j, p)| eq(line[i + j], *p)))
-        .collect()
+/// Compile a search pattern. Smartcase: case-insensitive unless the pattern has
+/// uppercase. A pattern that is not valid regex is matched literally.
+pub fn build_regex(pat: &str) -> Regex {
+    let fold = !pat.chars().any(|c| c.is_uppercase());
+    RegexBuilder::new(pat)
+        .case_insensitive(fold)
+        .build()
+        .or_else(|_| RegexBuilder::new(&regex::escape(pat)).case_insensitive(fold).build())
+        .expect("escaped pattern is valid")
 }
 
-pub fn search_matches(line: &[char], pat: &str) -> Vec<usize> {
-    let pat: Vec<char> = pat.chars().collect();
-    find_matches(line, &pat)
+/// Char ranges `(start, end)` of every match of `re` in `line`.
+pub fn search_matches(line: &[char], re: &Regex) -> Vec<(usize, usize)> {
+    let text: String = line.iter().collect();
+    // Byte offset -> char index.
+    let mut idx = vec![0; text.len() + 1];
+    for (ci, (bi, _)) in text.char_indices().enumerate() {
+        idx[bi] = ci;
+    }
+    idx[text.len()] = line.len();
+    re.find_iter(&text).map(|m| (idx[m.start()], idx[m.end()])).collect()
+}
+
+/// Split `s` on unescaped `delim`, unescaping `\delim`, into at most `n` parts.
+fn split_unescaped(s: &str, delim: char, n: usize) -> Vec<String> {
+    let mut parts = vec![String::new()];
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' && chars.peek() == Some(&delim) {
+            parts.last_mut().unwrap().push(chars.next().unwrap());
+        } else if c == delim && parts.len() < n {
+            parts.push(String::new());
+        } else {
+            parts.last_mut().unwrap().push(c);
+        }
+    }
+    parts
+}
+
+/// Vim-style `\1` backreferences become regex-crate `${1}`.
+fn convert_replacement(rep: &str) -> String {
+    let mut out = String::new();
+    let mut chars = rep.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (c, chars.peek()) {
+            ('\\', Some(d)) if d.is_ascii_digit() => {
+                out.push_str(&format!("${{{d}}}"));
+                chars.next();
+            }
+            ('\\', Some('n')) => {
+                out.push('\n');
+                chars.next();
+            }
+            ('\\', Some('t')) => {
+                out.push('\t');
+                chars.next();
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 // ---- engine --------------------------------------------------------------
@@ -1503,67 +1547,88 @@ impl Vim {
         None
     }
 
-    /// `:s/pat/rep/[g]` with literal matching; `all` applies it to every line.
+    /// `:s/pat/rep/[gi]` with regex patterns; `all` applies it to every line.
+    /// The replacement may use `$1`/`\1` groups, `\n` and `\t`.
     fn substitute(&mut self, buf: &mut Buffer, spec: &str, all: bool) {
         let mut chars = spec.chars();
         let Some(delim) = chars.next() else { return };
-        let parts: Vec<&str> = chars.as_str().splitn(3, delim).collect();
-        let pat: Vec<char> = parts.first().copied().unwrap_or("").chars().collect();
-        let rep: Vec<char> = parts.get(1).copied().unwrap_or("").chars().collect();
-        let global = parts.get(2).is_some_and(|f| f.contains('g'));
-        if pat.is_empty() {
-            self.error("E35: No previous regular expression");
-            return;
-        }
+        let parts = split_unescaped(chars.as_str(), delim, 3);
+        let flags = parts.get(2).map(String::as_str).unwrap_or("");
+        let global = flags.contains('g');
+        let pat = match parts[0].as_str() {
+            "" => match &self.search {
+                Some(p) => p.clone(),
+                None => {
+                    self.error("E35: No previous regular expression");
+                    return;
+                }
+            },
+            p => p.to_string(),
+        };
+        let re = if flags.contains('i') { build_regex(&format!("(?i){pat}")) } else { build_regex(&pat) };
+        let rep = convert_replacement(parts.get(1).map(String::as_str).unwrap_or(""));
         let lines = if all { 0..buf.line_count() } else { buf.cursor.line..buf.cursor.line + 1 };
-        buf.checkpoint();
-        let (mut subs, mut changed_lines, mut last_line) = (0, 0, None);
-        for l in lines {
-            let matches = find_matches(&buf.lines[l], &pat);
-            if matches.is_empty() {
+
+        // Rebuild the affected range as text so replacements may add or join lines.
+        let (first, last) = (lines.start, lines.end - 1);
+        let mut out = Vec::new();
+        let (mut subs, mut changed_lines, mut last_changed) = (0, 0, None);
+        for l in first..=last {
+            let text: String = buf.lines[l].iter().collect();
+            let n = re.find_iter(&text).take(if global { usize::MAX } else { 1 }).count();
+            if n == 0 {
+                out.push(text);
                 continue;
             }
-            let mut out = Vec::new();
-            let mut i = 0;
-            let line = &buf.lines[l];
-            for m in matches {
-                if m < i {
-                    continue;
-                }
-                out.extend_from_slice(&line[i..m]);
-                out.extend_from_slice(&rep);
-                i = m + pat.len();
-                subs += 1;
-                if !global {
-                    break;
-                }
-            }
-            out.extend_from_slice(&line[i..]);
-            buf.lines[l] = out;
+            subs += n;
             changed_lines += 1;
-            last_line = Some(l);
+            last_changed = Some(l);
+            out.push(re.replacen(&text, if global { 0 } else { 1 }, rep.as_str()).into_owned());
         }
-        match last_line {
-            Some(l) => {
-                buf.dirty = true;
-                buf.cursor = Pos::new(l, buf.first_non_blank(l));
-                if changed_lines > 1 {
-                    self.info(format!("{subs} substitutions on {changed_lines} lines"));
-                }
-            }
-            None => {
-                buf.undo();
-                self.error(format!("E486: Pattern not found: {}", pat.iter().collect::<String>()));
+        let Some(l) = last_changed else {
+            self.error(format!("E486: Pattern not found: {pat}"));
+            return;
+        };
+        buf.checkpoint();
+        let added = out.iter().map(|s| s.matches('\n').count()).sum::<usize>();
+        let whole = first == 0 && last == buf.last_line();
+        buf.delete_lines(first, last);
+        if whole {
+            buf.lines.clear(); // delete_lines leaves one empty line behind
+        }
+        buf.insert_lines(first, &out.join("\n"));
+        let l = (l + added).min(buf.last_line());
+        buf.cursor = Pos::new(l, buf.first_non_blank(l));
+        if changed_lines > 1 {
+            self.info(format!("{subs} substitutions on {changed_lines} lines"));
+        }
+    }
+
+    /// The current search as a compiled regex, if highlighting is on.
+    pub fn highlight_regex(&mut self) -> Option<Regex> {
+        if !self.highlight_search {
+            return None;
+        }
+        self.search_regex()
+    }
+
+    fn search_regex(&mut self) -> Option<Regex> {
+        let pat = self.search.as_ref().filter(|p| !p.is_empty())?;
+        match &self.search_re {
+            Some((p, re)) if p == pat => Some(re.clone()),
+            _ => {
+                let re = build_regex(pat);
+                self.search_re = Some((pat.clone(), re.clone()));
+                Some(re)
             }
         }
     }
 
     fn search_next(&mut self, buf: &mut Buffer, forward: bool) -> bool {
-        let Some(pat) = self.search.clone() else {
+        let Some(re) = self.search_regex() else {
             self.error("E35: No previous regular expression");
             return false;
         };
-        let pat: Vec<char> = pat.chars().collect();
         let cur = buf.cursor;
         let total = buf.line_count();
         for step in 0..=total {
@@ -1576,7 +1641,7 @@ impl Vim {
                 (_, true, false) => c >= cur.col,
                 _ => true,
             };
-            let ms = find_matches(&buf.lines[l], &pat);
+            let ms = search_matches(&buf.lines[l], &re).into_iter().map(|m| m.0);
             let hit = if forward {
                 ms.into_iter().find(|&c| ok(c))
             } else {
@@ -1592,7 +1657,7 @@ impl Vim {
                 return true;
             }
         }
-        self.error(format!("E486: Pattern not found: {}", pat.iter().collect::<String>()));
+        self.error(format!("E486: Pattern not found: {}", self.search.clone().unwrap_or_default()));
         false
     }
 }
@@ -1751,6 +1816,49 @@ mod tests {
     fn substitute_global() {
         let (b, _) = run("a a\na", ":%s/a/b/g<cr>");
         assert_eq!(b.text(), "b b\nb");
+    }
+
+    #[test]
+    fn regex_substitute_with_groups() {
+        let (b, _) = run("foo(1, 2)\nfoo(3, 4)", r":%s/foo\((\d), (\d)\)/bar(\2, $1)/<cr>");
+        assert_eq!(b.text(), "bar(2, 1)\nbar(4, 3)");
+    }
+
+    #[test]
+    fn regex_substitute_can_split_lines_and_undo() {
+        let (mut b, mut v) = run("a,b,c", r":s/,/\n/g<cr>");
+        assert_eq!(b.text(), "a\nb\nc");
+        feed(&mut b, &mut v, "u");
+        assert_eq!(b.text(), "a,b,c");
+    }
+
+    #[test]
+    fn substitute_escaped_delimiter_and_flags() {
+        let (b, _) = run("a/b A/B", r":s/a\/b/x/gi<cr>");
+        assert_eq!(b.text(), "x x");
+    }
+
+    #[test]
+    fn regex_search_and_smartcase() {
+        let (b, _) = run("x = 10\nfoo Bar 42", r"/\d{2}<cr>n");
+        assert_eq!(b.cursor, Pos::new(1, 8));
+        let (b, _) = run("bar\nBar", "/Bar<cr>");
+        assert_eq!(b.cursor, Pos::new(1, 0));
+        let (b, _) = run("xx\nBAR", "/bar<cr>");
+        assert_eq!(b.cursor, Pos::new(1, 0));
+    }
+
+    #[test]
+    fn invalid_regex_matches_literally() {
+        let (b, _) = run("call f(x)", "/f(<cr>");
+        assert_eq!(b.cursor, Pos::new(0, 5));
+    }
+
+    #[test]
+    fn search_matches_reports_char_ranges() {
+        let line: Vec<char> = "héllo wörld".chars().collect();
+        let re = build_regex("w.r");
+        assert_eq!(search_matches(&line, &re), vec![(6, 9)]);
     }
 
     #[test]
