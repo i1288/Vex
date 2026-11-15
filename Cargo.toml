@@ -1,6 +1,6 @@
 [package]
 name = "vex"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 description = "A fast code editor that looks like VS Code and edits like Vim"
 repository = "https://github.com/i1288/Vex"
