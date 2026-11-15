@@ -229,6 +229,9 @@ pub fn install(ctx: &egui::Context) {
 
     // Use a system UI font if one is installed; egui's bundled fonts are the fallback.
     let ui_fonts = [
+        "C:\\Windows\\Fonts\\segoeui.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
         "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
         "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",

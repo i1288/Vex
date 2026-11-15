@@ -613,6 +613,8 @@ fn convert_replacement(rep: &str) -> String {
 
 impl Vim {
     pub fn handle_key(&mut self, buf: &mut Buffer, key: Key) -> Option<Action> {
+        // Ctrl-C works like Esc, as in vim.
+        let key = if key == Key::Ctrl('c') { Key::Esc } else { key };
         if !matches!(self.mode, Mode::Command | Mode::Search) {
             self.message = None;
         }

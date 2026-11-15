@@ -46,11 +46,15 @@ pub struct VexApp {
     terminal_focused: bool,
     /// Wheel movement not yet turned into whole scrollback lines.
     terminal_scroll: f32,
+    logo: egui::TextureHandle,
 }
 
 impl VexApp {
     pub fn new(cc: &eframe::CreationContext<'_>, root: PathBuf, file: Option<PathBuf>) -> Self {
         theme::install(&cc.egui_ctx);
+        let icon = eframe::icon_data::from_png_bytes(crate::ICON_PNG).expect("bundled icon is a valid PNG");
+        let logo_image = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
+        let logo = cc.egui_ctx.load_texture("vex-logo", logo_image, egui::TextureOptions::LINEAR);
         let mut app = Self {
             ws: Workspace::default(),
             scratch: Buffer::default(),
@@ -69,6 +73,7 @@ impl VexApp {
             show_terminal: false,
             terminal_focused: false,
             terminal_scroll: 0.0,
+            logo,
         };
         app.reload_settings(&cc.egui_ctx);
         if let Some(f) = file {
@@ -144,7 +149,9 @@ impl VexApp {
 
     fn resolve(&self, p: &Path) -> PathBuf {
         let p = match p.strip_prefix("~") {
-            Ok(rest) => std::env::var_os("HOME").map_or(p.to_path_buf(), |h| PathBuf::from(h).join(rest)),
+            Ok(rest) => std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map_or(p.to_path_buf(), |h| PathBuf::from(h).join(rest)),
             Err(_) => p.to_path_buf(),
         };
         let p = if p.is_absolute() { p } else { self.explorer.root.join(p) };
@@ -413,7 +420,9 @@ impl VexApp {
                     EKey::Backtick | EKey::P | EKey::B | EKey::Comma | EKey::Equals | EKey::Plus | EKey::Minus
                         | EKey::Num0 | EKey::Num1 | EKey::Num2 | EKey::Num3 | EKey::Num4 | EKey::Num5
                 );
-                if modifiers.command && app_key {
+                if key == EKey::Backtick && modifiers.ctrl {
+                    self.toggle_terminal();
+                } else if modifiers.command && app_key {
                     self.shortcut(ctx, key, modifiers.shift);
                 } else if let Some(bytes) = terminal::encode_key(key, modifiers, t.application_cursor()) {
                     t.write(&bytes);
@@ -436,6 +445,11 @@ impl VexApp {
             }
             match ev {
                 egui::Event::Key { key, pressed: true, modifiers, .. } => {
+                    // Ctrl+` on every platform (Cmd+` switches windows on macOS).
+                    if key == EKey::Backtick && (modifiers.ctrl || modifiers.command) {
+                        self.toggle_terminal();
+                        continue;
+                    }
                     if modifiers.command && !modifiers.alt && self.shortcut(ctx, key, modifiers.shift) {
                         continue;
                     }
@@ -447,7 +461,8 @@ impl VexApp {
                     if self.quick_open.is_some() {
                         continue;
                     }
-                    let k = if modifiers.command {
+                    // Vim's Ctrl keys use the real Ctrl key (on macOS, Cmd is for app shortcuts).
+                    let k = if modifiers.ctrl {
                         match key {
                             EKey::OpenBracket => Some(Key::Esc),
                             _ => {
@@ -742,7 +757,7 @@ impl VexApp {
         let mut items: Vec<String> = Vec::new();
         if let Some(b) = buf {
             items.push(syntax::language_name(&b.extension()).to_string());
-            items.push("LF".into());
+            items.push(if b.crlf { "CRLF" } else { "LF" }.into());
             items.push("UTF-8".into());
             items.push(if buffer::expand_tab() { format!("Spaces: {}", tab_size()) } else { format!("Tab Size: {}", tab_size()) });
             match self.vim.selection(b) {
@@ -772,7 +787,7 @@ impl VexApp {
         if n == 1 && self.ws.groups[0].tabs.is_empty() {
             let painter = ui.painter_at(area);
             painter.rect_filled(area, 0.0, theme::p().editor_bg);
-            draw_welcome(&painter, area);
+            draw_welcome(&painter, area, &self.logo);
             return;
         }
         let w = area.width() / n as f32;
@@ -1237,21 +1252,24 @@ fn draw_search_icon(p: &Painter, c: egui::Pos2, color: Color32) {
     p.line_segment([pos2(c.x - 3.0, c.y + 3.0), pos2(c.x - 9.0, c.y + 9.0)], Stroke::new(2.2, color));
 }
 
-fn draw_welcome(p: &Painter, rect: Rect) {
+fn draw_welcome(p: &Painter, rect: Rect, logo: &egui::TextureHandle) {
     let c = rect.center();
-    p.text(pos2(c.x, c.y - 110.0), Align2::CENTER_CENTER, "Vex", FontId::proportional(64.0), Color32::from_gray(0x3c));
+    let logo_rect = Rect::from_center_size(pos2(c.x, c.y - 130.0), vec2(112.0, 112.0));
+    let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    p.image(logo.id(), logo_rect, uv, Color32::WHITE);
+    let cmd = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
     let rows = [
-        ("Go to File", "Ctrl + P"),
-        ("Command Line", ":"),
-        ("Open File", ":e <path>"),
-        ("Toggle Sidebar", "Ctrl + B"),
-        ("Save", ":w  /  Ctrl + S"),
-        ("Search in File", "/"),
-        ("Quit", ":q"),
+        ("Go to File", format!("{cmd} + P")),
+        ("Command Line", ":".into()),
+        ("Open File", ":e <path>".into()),
+        ("Toggle Sidebar", format!("{cmd} + B")),
+        ("Terminal", "Ctrl + `".into()),
+        ("Save", format!(":w  /  {cmd} + S")),
+        ("Quit", ":q".into()),
     ];
     for (i, (label, keys)) in rows.iter().enumerate() {
         let y = c.y - 30.0 + i as f32 * 26.0;
         p.text(pos2(c.x - 10.0, y), Align2::RIGHT_CENTER, *label, FontId::proportional(13.0), theme::p().text_muted);
-        p.text(pos2(c.x + 10.0, y), Align2::LEFT_CENTER, *keys, FontId::monospace(12.5), theme::p().text_ui);
+        p.text(pos2(c.x + 10.0, y), Align2::LEFT_CENTER, keys, FontId::monospace(12.5), theme::p().text_ui);
     }
 }

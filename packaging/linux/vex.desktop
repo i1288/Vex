@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Vex
+GenericName=Code Editor
+Comment=A fast code editor with vim modes
+Exec=vex %F
+Icon=vex
+Terminal=false
+Categories=Development;TextEditor;
+MimeType=text/plain;
+StartupWMClass=vex

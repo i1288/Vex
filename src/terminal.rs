@@ -29,9 +29,13 @@ fn nz(n: u16) -> NonZeroU16 {
 }
 
 impl Terminal {
-    /// Start the user's shell (`$SHELL`, else `/bin/bash`) in `cwd`.
+    /// Start the user's shell in `cwd`: `$SHELL` on Unix, PowerShell on Windows.
     pub fn spawn_shell(cwd: &Path, rows: u16, cols: u16, notify: impl Fn() + Send + 'static) -> Result<Self, String> {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+        if cfg!(windows) {
+            return Self::spawn("powershell.exe", &["-NoLogo"], cwd, rows, cols, notify);
+        }
+        let fallback = if cfg!(target_os = "macos") { "/bin/zsh" } else { "/bin/bash" };
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| fallback.into());
         Self::spawn(&shell, &[], cwd, rows, cols, notify)
     }
 
@@ -232,8 +236,10 @@ pub fn color(c: vt100::Color, fg: bool, bold: bool, p: &Palette) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
+    #[cfg(unix)]
     #[test]
     fn runs_a_program_and_captures_output() {
         let dir = std::env::temp_dir();
@@ -247,6 +253,7 @@ mod tests {
         assert_eq!(red, Some(vt100::Color::Idx(1)));
     }
 
+    #[cfg(unix)]
     #[test]
     fn input_reaches_the_program() {
         let dir = std::env::temp_dir();

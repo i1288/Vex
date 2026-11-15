@@ -56,6 +56,8 @@ pub struct Buffer {
     pub scroll_y: f32,
     pub scroll_x: f32,
     pub dirty: bool,
+    /// The file used Windows (CRLF) line endings; saving keeps them.
+    pub crlf: bool,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
 }
@@ -84,6 +86,7 @@ impl Buffer {
             scroll_y: 0.0,
             scroll_x: 0.0,
             dirty: false,
+            crlf: text.contains("\r\n"),
             undo: Vec::new(),
             redo: Vec::new(),
         }
@@ -107,6 +110,9 @@ impl Buffer {
             .ok_or_else(|| io::Error::other("E32: No file name"))?;
         let mut text = self.text();
         text.push('\n');
+        if self.crlf {
+            text = text.replace('\n', "\r\n");
+        }
         fs::write(&path, &text)?;
         self.dirty = false;
         Ok(text.len())
@@ -365,6 +371,19 @@ mod tests {
     fn trailing_newline_is_not_an_extra_line() {
         let b = Buffer::from_str("a\nb\n");
         assert_eq!(b.line_count(), 2);
+    }
+
+    #[test]
+    fn crlf_files_keep_their_line_endings() {
+        let path = std::env::temp_dir().join(format!("vex-crlf-{}.txt", std::process::id()));
+        std::fs::write(&path, "a\r\nb\r\n").unwrap();
+        let mut b = Buffer::open(&path).unwrap();
+        assert!(b.crlf);
+        assert_eq!(b.text(), "a\nb");
+        b.insert(Pos::new(1, 1), "c");
+        b.save().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\r\nbc\r\n");
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

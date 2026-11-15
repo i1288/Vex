@@ -1,0 +1,82 @@
+name: Release
+
+# Push a tag like v0.2.0 to build Linux, Windows and macOS packages and
+# publish them as a GitHub Release. Run manually to just build artifacts.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
+
+jobs:
+  linux:
+    # The oldest supported runner keeps the glibc requirement low.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libgl1-mesa-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libwayland-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --release
+      - run: cargo build --release
+      - run: scripts/package-linux.sh "$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "vex-$env:VERSION-windows-x86_64"
+          New-Item -ItemType Directory -Force "dist/$name" | Out-Null
+          Copy-Item target/release/vex.exe, README.md "dist/$name/"
+          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*.zip
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --target aarch64-apple-darwin
+      - run: cargo build --release --target x86_64-apple-darwin
+      - run: scripts/package-macos.sh "$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*.zip
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
