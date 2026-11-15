@@ -4,6 +4,7 @@
 use regex::{Regex, RegexBuilder};
 
 use crate::buffer::{expand_tab, indent_unit, tab_size, Buffer, Pos};
+use crate::keymap::{self, Keymaps, Lookup, MapMode, Mapping, Origin};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -66,6 +67,10 @@ pub enum Action {
     Split(Option<String>),
     /// A `Ctrl-w` window command: h l w W v s q c o.
     Window(char),
+    /// Run a script file (`:source`).
+    Source(String),
+    /// An app command by name: terminal, files, sidebar, keybindings.
+    App(&'static str),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -145,7 +150,19 @@ pub struct Vim {
     last_find: Option<(char, char)>,
     history: Vec<String>,
     history_idx: usize,
+    pub keymaps: Keymaps,
+    /// What `<Leader>` expands to (`let mapleader = ...`).
+    pub leader: Vec<Key>,
+    /// Origin recorded for mappings defined by `:map` commands.
+    pub map_origin: Origin,
+    /// Typed keys held back because they may start a mapping.
+    typeahead: Vec<Key>,
+    typeahead_since: f64,
 }
+
+/// How long typed keys wait for the rest of a mapping (vim's 'timeoutlen').
+pub const MAP_TIMEOUT: f64 = 1.0;
+const DEFAULT_LEADER: char = '\\';
 
 impl Default for Vim {
     fn default() -> Self {
@@ -170,6 +187,11 @@ impl Default for Vim {
             last_find: None,
             history: Vec::new(),
             history_idx: 0,
+            keymaps: Keymaps::default(),
+            leader: vec![Key::Char(DEFAULT_LEADER)],
+            map_origin: Origin::Runtime,
+            typeahead: Vec::new(),
+            typeahead_since: 0.0,
         }
     }
 }
@@ -612,6 +634,83 @@ fn convert_replacement(rep: &str) -> String {
 // ---- engine --------------------------------------------------------------
 
 impl Vim {
+    /// Type one key: mappings apply, then the editor handles the result.
+    /// `now` is a clock in seconds, for the mapping timeout.
+    pub fn feed(&mut self, buf: &mut Buffer, key: Key, now: f64) -> Vec<Action> {
+        self.typeahead.push(key);
+        self.typeahead_since = now;
+        self.process_typeahead(buf, false)
+    }
+
+    /// When held-back keys stop waiting for a mapping and run as typed.
+    pub fn typeahead_deadline(&self) -> Option<f64> {
+        (!self.typeahead.is_empty()).then_some(self.typeahead_since + MAP_TIMEOUT)
+    }
+
+    /// The mapping timeout passed: run held-back keys.
+    pub fn flush_typeahead(&mut self, buf: &mut Buffer) -> Vec<Action> {
+        self.process_typeahead(buf, true)
+    }
+
+    /// The mapping table for the current state; none mid-command or on the command line.
+    fn map_mode(&self) -> Option<MapMode> {
+        match self.mode {
+            Mode::Normal if self.pending.is_empty() => Some(MapMode::Normal),
+            Mode::Visual | Mode::VisualLine if self.pending.is_empty() => Some(MapMode::Visual),
+            Mode::Insert => Some(MapMode::Insert),
+            _ => None,
+        }
+    }
+
+    fn process_typeahead(&mut self, buf: &mut Buffer, timed_out: bool) -> Vec<Action> {
+        let mut actions = Vec::new();
+        let mut expansions = 0;
+        while !self.typeahead.is_empty() {
+            let found = match self.map_mode() {
+                Some(m) => self.keymaps.lookup(m, &self.typeahead),
+                None => Lookup::None,
+            };
+            match found {
+                Lookup::Exact { index, ambiguous } if !ambiguous || timed_out => {
+                    let m = self.keymaps.maps[index].clone();
+                    self.typeahead.drain(..m.lhs.len());
+                    expansions += 1;
+                    if expansions > 100 {
+                        self.typeahead.clear();
+                        self.error("E223: recursive mapping");
+                        break;
+                    }
+                    if m.noremap {
+                        for k in m.rhs {
+                            actions.extend(self.handle_key(buf, k));
+                        }
+                    } else {
+                        self.typeahead.splice(0..0, m.rhs);
+                    }
+                }
+                Lookup::Prefix | Lookup::Exact { .. } if !timed_out => break,
+                _ => {
+                    let k = self.typeahead.remove(0);
+                    actions.extend(self.handle_key(buf, k));
+                }
+            }
+        }
+        actions
+    }
+
+    /// Run one ex command line (from a script); errors come back as `Err`.
+    pub fn execute(&mut self, buf: &mut Buffer, line: &str) -> Result<Option<Action>, String> {
+        self.message = None;
+        let action = self.ex_command(buf, line);
+        match self.message.take() {
+            Some(msg) if self.message_is_error => Err(msg),
+            msg => {
+                self.message = msg;
+                Ok(action)
+            }
+        }
+    }
+
     pub fn handle_key(&mut self, buf: &mut Buffer, key: Key) -> Option<Action> {
         // Ctrl-C works like Esc, as in vim.
         let key = if key == Key::Ctrl('c') { Key::Esc } else { key };
@@ -635,6 +734,7 @@ impl Vim {
     pub fn pending_keys(&self) -> String {
         self.pending
             .iter()
+            .chain(&self.typeahead)
             .map(|k| match k {
                 Key::Char(c) => c.to_string(),
                 Key::Ctrl(c) => format!("^{}", c.to_ascii_uppercase()),
@@ -1519,7 +1619,7 @@ impl Vim {
 
     fn ex_command(&mut self, buf: &mut Buffer, line: &str) -> Option<Action> {
         let cmd = line.trim();
-        if cmd.is_empty() {
+        if cmd.is_empty() || cmd.starts_with('"') {
             return None;
         }
         if let Ok(n) = cmd.parse::<usize>() {
@@ -1537,7 +1637,19 @@ impl Vim {
             Some((w, a)) => (w, Some(a.trim().to_string()).filter(|a| !a.is_empty())),
             None => (cmd, None),
         };
+        if self.map_command(word, arg.as_deref()) {
+            return None;
+        }
         match word {
+            "let" => self.let_command(arg.as_deref().unwrap_or("")),
+            "source" | "so" => match arg {
+                Some(path) => return Some(Action::Source(path)),
+                None => self.error("E471: Argument required"),
+            },
+            "terminal" | "term" => return Some(Action::App("terminal")),
+            "files" | "find" => return Some(Action::App("files")),
+            "sidebar" | "explorer" | "Explore" | "Lex" => return Some(Action::App("sidebar")),
+            "keybindings" | "keys" | "shortcuts" => return Some(Action::App("keybindings")),
             "w" | "w!" | "write" => return Some(Action::Write(arg)),
             "wa" | "wall" => return Some(Action::WriteAll),
             "q" | "quit" | "bd" | "close" => return Some(Action::Quit { force: false }),
@@ -1569,6 +1681,107 @@ impl Vim {
             _ => self.error(format!("E492: Not an editor command: {cmd}")),
         }
         None
+    }
+
+    /// `:map` family. Returns false if `word` is not a mapping command.
+    fn map_command(&mut self, word: &str, arg: Option<&str>) -> bool {
+        use MapMode::*;
+        enum Kind {
+            Map(bool),
+            Unmap,
+            Clear,
+        }
+        let (modes, kind): (&[MapMode], Kind) = match word {
+            "map" => (&[Normal, Visual], Kind::Map(false)),
+            "noremap" | "no" => (&[Normal, Visual], Kind::Map(true)),
+            "nmap" | "nm" => (&[Normal], Kind::Map(false)),
+            "nnoremap" | "nno" => (&[Normal], Kind::Map(true)),
+            "imap" | "im" => (&[Insert], Kind::Map(false)),
+            "inoremap" | "ino" => (&[Insert], Kind::Map(true)),
+            "vmap" | "vm" | "xmap" | "xm" => (&[Visual], Kind::Map(false)),
+            "vnoremap" | "vn" | "xnoremap" | "xn" => (&[Visual], Kind::Map(true)),
+            "unmap" | "unm" => (&[Normal, Visual], Kind::Unmap),
+            "nunmap" | "nun" => (&[Normal], Kind::Unmap),
+            "iunmap" | "iu" => (&[Insert], Kind::Unmap),
+            "vunmap" | "vu" | "xunmap" | "xu" => (&[Visual], Kind::Unmap),
+            "mapclear" | "mapc" => (&[Normal, Visual], Kind::Clear),
+            "nmapclear" | "nmapc" => (&[Normal], Kind::Clear),
+            "imapclear" | "imapc" => (&[Insert], Kind::Clear),
+            "vmapclear" | "vmapc" | "xmapclear" | "xmapc" => (&[Visual], Kind::Clear),
+            _ => return false,
+        };
+        // Modifiers vim scripts commonly carry; they don't change anything here.
+        let mut rest = arg.unwrap_or("").trim_start();
+        while let Some(r) = ["<silent>", "<buffer>", "<nowait>", "<unique>"].iter().find_map(|m| rest.strip_prefix(m)) {
+            rest = r.trim_start();
+        }
+        let (lhs, rhs) = match rest.split_once(char::is_whitespace) {
+            Some((l, r)) => (l, r.trim_start()),
+            None => (rest, ""),
+        };
+        let lhs_keys = keymap::parse_keys(lhs, &self.leader);
+        match kind {
+            Kind::Clear => modes.iter().for_each(|&m| self.keymaps.clear(m)),
+            Kind::Unmap if lhs.is_empty() => self.error("E474: Invalid argument"),
+            Kind::Unmap => {
+                let removed = modes.iter().fold(false, |any, &m| self.keymaps.remove(m, &lhs_keys) || any);
+                if !removed {
+                    self.error(format!("E31: No such mapping: {lhs}"));
+                }
+            }
+            Kind::Map(_) if rhs.is_empty() => self.list_mappings(modes, (!lhs.is_empty()).then_some(&lhs_keys)),
+            Kind::Map(noremap) => {
+                let rhs = keymap::parse_keys(rhs, &self.leader);
+                for &mode in modes {
+                    self.keymaps.insert(Mapping { mode, lhs: lhs_keys.clone(), rhs: rhs.clone(), noremap, origin: self.map_origin });
+                }
+            }
+        }
+        true
+    }
+
+    fn list_mappings(&mut self, modes: &[MapMode], lhs: Option<&Vec<Key>>) {
+        let found: Vec<String> = self
+            .keymaps
+            .maps
+            .iter()
+            .filter(|m| modes.contains(&m.mode) && lhs.is_none_or(|l| m.lhs.starts_with(l)))
+            .map(|m| format!("{} {} {}", m.mode.letter(), keymap::format_keys(&m.lhs), keymap::format_keys(&m.rhs)))
+            .collect();
+        if found.is_empty() {
+            self.info("No mapping found");
+        } else {
+            self.info(found.join("   |   "));
+        }
+    }
+
+    /// `:let mapleader = ","` (other variables are accepted and ignored).
+    fn let_command(&mut self, arg: &str) {
+        let Some((name, value)) = arg.split_once('=') else {
+            self.error(format!("E15: Invalid expression: {arg}"));
+            return;
+        };
+        let value = value.trim();
+        let unquoted = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+            .unwrap_or(value);
+        if name.trim() == "mapleader" {
+            // "\<Space>" in a double-quoted vim string is the key itself.
+            let keys = keymap::parse_keys(&unquoted.replace("\\<", "<"), &[]);
+            if keys.is_empty() {
+                self.error("E15: mapleader cannot be empty");
+            } else {
+                self.leader = keys;
+            }
+        }
+    }
+
+    /// Reset what scripts set up, before reloading them.
+    pub fn reset_script_state(&mut self) {
+        self.keymaps.clear_origin(Origin::Script);
+        self.leader = vec![Key::Char(DEFAULT_LEADER)];
     }
 
     /// `:s/pat/rep/[gi]` with regex patterns; `all` applies it to every line.
@@ -1883,6 +2096,88 @@ mod tests {
         let line: Vec<char> = "héllo wörld".chars().collect();
         let re = build_regex("w.r");
         assert_eq!(search_matches(&line, &re), vec![(6, 9)]);
+    }
+
+    /// Type keys through the mapping layer at time `t`.
+    fn type_at(buf: &mut Buffer, vim: &mut Vim, keys: &str, t: f64) -> Vec<Action> {
+        keymap::parse_keys(keys, &[]).into_iter().flat_map(|k| vim.feed(buf, k, t)).collect()
+    }
+
+    fn ex(buf: &mut Buffer, vim: &mut Vim, line: &str) {
+        vim.execute(buf, line).unwrap();
+    }
+
+    #[test]
+    fn insert_mapping_jk_escapes() {
+        let mut b = Buffer::from_str("");
+        let mut v = Vim::default();
+        ex(&mut b, &mut v, "inoremap jk <Esc>");
+        type_at(&mut b, &mut v, "ihijk", 0.0);
+        assert_eq!(b.text(), "hi");
+        assert_eq!(v.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn held_key_is_typed_after_timeout_or_other_key() {
+        let mut b = Buffer::from_str("");
+        let mut v = Vim::default();
+        ex(&mut b, &mut v, "inoremap jk <Esc>");
+        type_at(&mut b, &mut v, "ij", 0.0);
+        assert_eq!(b.text(), "", "j waits for a possible k");
+        assert_eq!(v.typeahead_deadline(), Some(MAP_TIMEOUT));
+        v.flush_typeahead(&mut b);
+        assert_eq!(b.text(), "j");
+        type_at(&mut b, &mut v, "jx", 2.0);
+        assert_eq!(b.text(), "jjx");
+    }
+
+    #[test]
+    fn leader_mapping_to_ex_command() {
+        let mut b = Buffer::from_str("a");
+        let mut v = Vim::default();
+        ex(&mut b, &mut v, r#"let mapleader = "<Space>""#);
+        ex(&mut b, &mut v, "nnoremap <leader>w :w<CR>");
+        let actions = type_at(&mut b, &mut v, "<Space>w", 0.0);
+        assert_eq!(actions, vec![Action::Write(None)]);
+    }
+
+    #[test]
+    fn recursive_and_non_recursive_maps() {
+        let mut b = Buffer::from_str("abcdef");
+        let mut v = Vim::default();
+        ex(&mut b, &mut v, "nnoremap x l");
+        ex(&mut b, &mut v, "nmap Q xx"); // recursive: each x becomes l
+        type_at(&mut b, &mut v, "Q", 0.0);
+        assert_eq!(b.cursor.col, 2);
+        assert_eq!(b.text(), "abcdef", "x was remapped, nothing deleted");
+        ex(&mut b, &mut v, "nnoremap W xx"); // not remapped: real deletes
+        type_at(&mut b, &mut v, "W", 0.0);
+        assert_eq!(b.text(), "abef");
+        ex(&mut b, &mut v, "nmap R R");
+        type_at(&mut b, &mut v, "R", 0.0);
+        assert_eq!(v.message.as_deref(), Some("E223: recursive mapping"));
+    }
+
+    #[test]
+    fn mappings_wait_for_pending_operator() {
+        let mut b = Buffer::from_str("one two");
+        let mut v = Vim::default();
+        ex(&mut b, &mut v, "nnoremap w b");
+        type_at(&mut b, &mut v, "dw", 0.0); // `w` after `d` is a motion, not the mapping
+        assert_eq!(b.text(), "two");
+    }
+
+    #[test]
+    fn unmap_and_list() {
+        let mut b = Buffer::from_str("");
+        let mut v = Vim::default();
+        ex(&mut b, &mut v, "nnoremap <silent> <C-s> :w<CR>");
+        ex(&mut b, &mut v, "nmap");
+        assert_eq!(v.message.as_deref(), Some("n <C-s> :w<CR>"));
+        ex(&mut b, &mut v, "nunmap <C-s>");
+        assert!(v.keymaps.maps.is_empty());
+        assert!(v.execute(&mut b, "nunmap <C-s>").is_err());
+        assert!(v.execute(&mut b, "\" a comment").unwrap().is_none());
     }
 
     #[test]

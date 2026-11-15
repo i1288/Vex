@@ -9,7 +9,10 @@ use eframe::egui::{
 };
 
 use crate::buffer::{self, tab_size, Buffer, Pos};
+use crate::commands::{self, Command, Keybindings};
 use crate::explorer::{self, Explorer};
+use crate::keymap::{self, MapMode, Mapping, Origin};
+use crate::keys_panel::KeysPanel;
 use crate::settings::{self, Settings};
 use crate::syntax;
 use crate::terminal::{self, Terminal};
@@ -47,6 +50,8 @@ pub struct VexApp {
     /// Wheel movement not yet turned into whole scrollback lines.
     terminal_scroll: f32,
     logo: egui::TextureHandle,
+    keys: Keybindings,
+    keys_panel: Option<KeysPanel>,
 }
 
 impl VexApp {
@@ -74,8 +79,12 @@ impl VexApp {
             terminal_focused: false,
             terminal_scroll: 0.0,
             logo,
+            keys: Keybindings::default(),
+            keys_panel: None,
         };
         app.reload_settings(&cc.egui_ctx);
+        app.load_keybindings();
+        app.load_init_script();
         if let Some(f) = file {
             app.open(&f);
         }
@@ -122,11 +131,165 @@ impl VexApp {
         self.apply_settings(ctx);
     }
 
+    fn open_init_script(&mut self) {
+        let Some(path) = settings::init_script_path() else { return };
+        if !path.exists() {
+            let template = "\" Vex startup script: one : command per line, like a .vimrc.\n\
+                            \" Saved changes apply right away. Examples:\n\
+                            \"\n\
+                            \" let mapleader = \"<Space>\"\n\
+                            \" inoremap jk <Esc>\n\
+                            \" nnoremap <Leader>w :w<CR>\n\
+                            \" nnoremap <Leader>t :terminal<CR>\n\
+                            \" set relativenumber\n";
+            let _ = path.parent().map(std::fs::create_dir_all);
+            if let Err(e) = std::fs::write(&path, template) {
+                self.error(format!("Cannot create {}: {e}", path.display()));
+                return;
+            }
+        }
+        self.open(&path);
+    }
+
     fn open_settings(&mut self) {
         match settings::ensure_file() {
             Ok(p) => self.open(&p),
             Err(e) => self.error(format!("Cannot create settings file: {e}")),
         }
+    }
+
+    fn load_keybindings(&mut self) {
+        let (keys, errors) = Keybindings::load();
+        self.keys = keys;
+        self.apply_panel_maps();
+        if let Some(e) = errors.into_iter().next() {
+            self.error(e);
+        }
+    }
+
+    /// Install the Vim mappings made in the Keyboard Shortcuts panel.
+    fn apply_panel_maps(&mut self) {
+        self.vim.keymaps.clear_origin(Origin::Panel);
+        for m in &self.keys.maps {
+            let Some(mode) = MapMode::from_name(&m.mode) else { continue };
+            let lhs = keymap::parse_keys(m.keys.trim(), &self.vim.leader);
+            if lhs.is_empty() {
+                continue;
+            }
+            let rhs = keymap::parse_keys(&m.action, &self.vim.leader);
+            self.vim.keymaps.insert(Mapping { mode, lhs, rhs, noremap: true, origin: Origin::Panel });
+        }
+    }
+
+    fn save_keybindings(&mut self) {
+        self.apply_panel_maps();
+        if let Err(e) = self.keys.save() {
+            self.error(format!("Cannot save keybindings: {e}"));
+        }
+    }
+
+    fn open_keys_panel(&mut self) {
+        self.quick_open = None;
+        if self.vim.mode == Mode::Command || self.vim.mode == Mode::Search {
+            self.vim.mode = Mode::Normal;
+        }
+        self.keys_panel = Some(KeysPanel::default());
+    }
+
+    /// Run init.vex, the vim-style startup script, if it exists.
+    fn load_init_script(&mut self) {
+        let Some(path) = settings::init_script_path().filter(|p| p.exists()) else { return };
+        self.vim.reset_script_state();
+        self.run_script(&path, 0);
+        self.apply_panel_maps(); // <Leader> may have changed
+    }
+
+    /// Run each line of a script as a `:` command. Errors are reported with
+    /// their line number; the rest of the script still runs.
+    fn run_script(&mut self, path: &Path, depth: usize) {
+        if depth > 8 {
+            self.error("E169: Command too recursive");
+            return;
+        }
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) => {
+                self.error(format!("Cannot read {}: {e}", path.display()));
+                return;
+            }
+        };
+        let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+        let mut first_error = None;
+        for (n, line) in text.lines().enumerate() {
+            self.vim.map_origin = Origin::Script;
+            let result = self.vim.execute(&mut self.scratch, line);
+            self.vim.map_origin = Origin::Runtime;
+            match result {
+                Err(e) => {
+                    first_error.get_or_insert(format!("{name}:{}: {e}", n + 1));
+                }
+                Ok(Some(Action::Source(p))) => {
+                    let p = self.resolve(Path::new(&p));
+                    self.run_script(&p, depth + 1);
+                }
+                // A startup script shouldn't write or quit anything.
+                Ok(Some(Action::Write(_) | Action::WriteAll | Action::WriteQuit | Action::WriteQuitAll)) => {}
+                Ok(Some(Action::Quit { .. } | Action::QuitAll { .. })) => {}
+                Ok(Some(action)) => self.handle_action(&self.ctx.clone(), action),
+                Ok(None) => {}
+            }
+        }
+        if let Some(e) = first_error {
+            self.error(e);
+        }
+    }
+
+    fn run_command(&mut self, ctx: &egui::Context, c: Command) {
+        match c {
+            Command::Save => {
+                if let Some(b) = self.ws.current() {
+                    self.save(Some(b), None);
+                }
+            }
+            Command::CommandLine => {
+                self.terminal_focused = false;
+                self.quick_open = None;
+                self.vim.mode = Mode::Command;
+                self.vim.cmdline.clear();
+            }
+            Command::QuickOpen => {
+                self.quick_open = match self.quick_open {
+                    Some(_) => None,
+                    None => Some(QuickOpen {
+                        query: String::new(),
+                        files: explorer::all_files(&self.explorer.root),
+                        selected: 0,
+                    }),
+                };
+            }
+            Command::ToggleSidebar => self.show_sidebar = !self.show_sidebar,
+            Command::ToggleTerminal => self.toggle_terminal(),
+            Command::ToggleWrap => {
+                self.settings.word_wrap = !self.settings.word_wrap;
+                self.follow_cursor = true;
+            }
+            Command::SplitEditor => self.handle_action(ctx, Action::Split(None)),
+            Command::NextTab => self.handle_action(ctx, Action::NextTab),
+            Command::PrevTab => self.handle_action(ctx, Action::PrevTab),
+            Command::ZoomIn => self.settings.font_size = (self.settings.font_size + 1.0).min(48.0),
+            Command::ZoomOut => self.settings.font_size = (self.settings.font_size - 1.0).max(6.0),
+            Command::ZoomReset => {
+                self.settings.font_size = settings::load().map_or(Settings::default().font_size, |s| s.font_size);
+            }
+            Command::OpenSettings => self.open_settings(),
+            Command::Keybindings => self.open_keys_panel(),
+            Command::FocusPane(n) => {
+                self.ws.focus_group(n as usize - 1);
+                self.focus_changed();
+                self.terminal_focused = false;
+            }
+        }
+        ctx.request_repaint();
     }
 
     fn info(&mut self, msg: impl Into<String>) {
@@ -222,10 +385,15 @@ impl VexApp {
             Ok(bytes) => {
                 let msg = format!("\"{}\" {}L, {}B written", buf.name(), buf.line_count(), bytes);
                 let is_settings = buf.path.is_some() && buf.path == settings::path();
+                let is_script = buf.path.is_some() && buf.path == settings::init_script_path();
                 self.info(msg);
                 self.explorer.refresh();
                 if is_settings && self.reload_settings(&self.ctx.clone()) {
                     self.info("Settings applied");
+                }
+                if is_script {
+                    self.info("init.vex reloaded");
+                    self.load_init_script();
                 }
                 true
             }
@@ -308,6 +476,20 @@ impl VexApp {
                     self.open(Path::new(&p));
                 }
             }
+            Action::Source(p) => {
+                let p = self.resolve(Path::new(&p));
+                self.run_script(&p, 0);
+                self.apply_panel_maps();
+            }
+            Action::App(name) => {
+                let c = match name {
+                    "terminal" => Command::ToggleTerminal,
+                    "files" => Command::QuickOpen,
+                    "sidebar" => Command::ToggleSidebar,
+                    _ => Command::Keybindings,
+                };
+                self.run_command(ctx, c);
+            }
             Action::Window(c) => {
                 match c {
                     'h' => self.ws.focus_step(-1, false),
@@ -335,61 +517,35 @@ impl VexApp {
             Some(b) => &mut self.ws.buffers[b],
             None => &mut self.scratch,
         };
-        let action = self.vim.handle_key(buf, key);
+        let now = ctx.input(|i| i.time);
+        let actions = self.vim.feed(buf, key, now);
+        self.after_keys(ctx, actions);
+    }
+
+    fn after_keys(&mut self, ctx: &egui::Context, actions: Vec<Action>) {
         self.follow_cursor = true;
         if let Some(text) = self.vim.clipboard_out.take() {
             ctx.copy_text(text);
         }
-        if let Some(a) = action {
+        for a in actions {
             self.handle_action(ctx, a);
         }
     }
 
-    /// App-level Ctrl shortcuts. Returns true if the key was used.
-    fn shortcut(&mut self, ctx: &egui::Context, key: EKey, shift: bool) -> bool {
-        match key {
-            EKey::S => {
-                if let Some(b) = self.ws.current() {
-                    self.save(Some(b), None);
-                }
-            }
-            EKey::P if shift => {
-                self.terminal_focused = false;
-                self.quick_open = None;
-                self.vim.mode = Mode::Command;
-                self.vim.cmdline.clear();
-            }
-            EKey::P => {
-                self.quick_open = match self.quick_open {
-                    Some(_) => None,
-                    None => Some(QuickOpen {
-                        query: String::new(),
-                        files: explorer::all_files(&self.explorer.root),
-                        selected: 0,
-                    }),
-                };
-            }
-            EKey::B => self.show_sidebar = !self.show_sidebar,
-            EKey::Tab | EKey::PageDown if !shift => self.handle_action(ctx, Action::NextTab),
-            EKey::Tab | EKey::PageUp => self.handle_action(ctx, Action::PrevTab),
-            EKey::Backslash => self.handle_action(ctx, Action::Split(None)),
-            EKey::Num1 | EKey::Num2 | EKey::Num3 | EKey::Num4 | EKey::Num5 => {
-                let n = key.name().parse::<usize>().unwrap_or(1);
-                self.ws.focus_group(n - 1);
-                self.focus_changed();
-                self.terminal_focused = false;
-            }
-            EKey::Equals | EKey::Plus => self.settings.font_size = (self.settings.font_size + 1.0).min(48.0),
-            EKey::Minus => self.settings.font_size = (self.settings.font_size - 1.0).max(6.0),
-            EKey::Num0 => {
-                self.settings.font_size = settings::load().map_or(Settings::default().font_size, |s| s.font_size);
-            }
-            EKey::Comma => self.open_settings(),
-            EKey::Backtick => self.toggle_terminal(),
-            _ => return false,
+    /// Keys held for a possible mapping run as typed once the timeout passes.
+    fn check_mapping_timeout(&mut self, ctx: &egui::Context) {
+        let Some(deadline) = self.vim.typeahead_deadline() else { return };
+        let now = ctx.input(|i| i.time);
+        if now >= deadline {
+            let buf = match self.ws.current() {
+                Some(b) => &mut self.ws.buffers[b],
+                None => &mut self.scratch,
+            };
+            let actions = self.vim.flush_typeahead(buf);
+            self.after_keys(ctx, actions);
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(deadline - now));
         }
-        ctx.request_repaint();
-        true
     }
 
     /// Keys go to the terminal when its panel is open and focused.
@@ -415,15 +571,9 @@ impl VexApp {
         let Some(t) = &mut self.terminal else { return };
         match ev {
             egui::Event::Key { key, pressed: true, modifiers, .. } => {
-                let app_key = matches!(
-                    key,
-                    EKey::Backtick | EKey::P | EKey::B | EKey::Comma | EKey::Equals | EKey::Plus | EKey::Minus
-                        | EKey::Num0 | EKey::Num1 | EKey::Num2 | EKey::Num3 | EKey::Num4 | EKey::Num5
-                );
-                if key == EKey::Backtick && modifiers.ctrl {
-                    self.toggle_terminal();
-                } else if modifiers.command && app_key {
-                    self.shortcut(ctx, key, modifiers.shift);
+                let app_command = self.keys.lookup(key, modifiers).filter(|c| commands::info_of(*c).in_terminal);
+                if let Some(c) = app_command {
+                    self.run_command(ctx, c);
                 } else if let Some(bytes) = terminal::encode_key(key, modifiers, t.application_cursor()) {
                     t.write(&bytes);
                 }
@@ -437,25 +587,22 @@ impl VexApp {
     }
 
     fn handle_input(&mut self, ctx: &egui::Context) {
+        if self.keys_panel.is_some() {
+            return; // the panel reads its own input
+        }
         let events = ctx.input(|i| i.events.clone());
         for ev in events {
+            if self.keys_panel.is_some() {
+                break; // a shortcut just opened it
+            }
             if self.terminal_has_keys() {
                 self.terminal_input(ctx, ev);
                 continue;
             }
             match ev {
                 egui::Event::Key { key, pressed: true, modifiers, .. } => {
-                    // Ctrl+` on every platform (Cmd+` switches windows on macOS).
-                    if key == EKey::Backtick && (modifiers.ctrl || modifiers.command) {
-                        self.toggle_terminal();
-                        continue;
-                    }
-                    if modifiers.command && !modifiers.alt && self.shortcut(ctx, key, modifiers.shift) {
-                        continue;
-                    }
-                    if modifiers.alt && !modifiers.command && key == EKey::Z {
-                        self.settings.word_wrap = !self.settings.word_wrap;
-                        self.follow_cursor = true;
+                    if let Some(c) = self.keys.lookup(key, modifiers) {
+                        self.run_command(ctx, c);
                         continue;
                     }
                     if self.quick_open.is_some() {
@@ -559,16 +706,26 @@ impl VexApp {
         if resp.clicked() {
             self.show_sidebar = !self.show_sidebar;
         }
-        resp.on_hover_text("Explorer (Ctrl+B)");
+        resp.on_hover_text(format!("Explorer ({})", self.keys.label(Command::ToggleSidebar)));
 
         let r = icon(1);
         let resp = ui.interact(r, ui.scope_id().with("act-search"), Sense::click());
         let color = if self.quick_open.is_some() || resp.hovered() { theme::p().bar_fg } else { theme::p().icon_inactive };
         draw_search_icon(painter, r.center(), color);
         if resp.clicked() {
-            self.shortcut(ui.ctx(), EKey::P, false);
+            self.run_command(&ui.ctx().clone(), Command::QuickOpen);
         }
-        resp.on_hover_text("Go to File (Ctrl+P)");
+        resp.on_hover_text(format!("Go to File ({})", self.keys.label(Command::QuickOpen)));
+
+        // Bottom: the gear, like VS Code's Manage button.
+        let r = Rect::from_min_size(pos2(rect.left(), rect.bottom() - 48.0), vec2(48.0, 48.0));
+        let resp = ui.interact(r, ui.scope_id().with("act-keys"), Sense::click());
+        let color = if self.keys_panel.is_some() || resp.hovered() { theme::p().bar_fg } else { theme::p().icon_inactive };
+        draw_gear_icon(ui.painter(), r.center(), color);
+        if resp.clicked() {
+            self.open_keys_panel();
+        }
+        resp.on_hover_text(format!("Keyboard Shortcuts ({})", self.keys.label(Command::Keybindings)));
     }
 
     fn sidebar(&mut self, ui: &mut Ui) {
@@ -787,7 +944,7 @@ impl VexApp {
         if n == 1 && self.ws.groups[0].tabs.is_empty() {
             let painter = ui.painter_at(area);
             painter.rect_filled(area, 0.0, theme::p().editor_bg);
-            draw_welcome(&painter, area, &self.logo);
+            draw_welcome(&painter, area, &self.logo, &self.keys);
             return;
         }
         let w = area.width() / n as f32;
@@ -1121,12 +1278,19 @@ impl VexApp {
 }
 
 impl eframe::App for VexApp {
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if let Some(s) = &mut self.snapshot {
+            raw_input.events.extend(s.take_events());
+        }
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         if let Some(s) = &mut self.snapshot {
             s.tick(&ctx);
         }
         self.handle_input(&ctx);
+        self.check_mapping_timeout(&ctx);
         self.handle_close_request(&ctx);
         self.update_title(&ctx);
 
@@ -1160,9 +1324,23 @@ impl eframe::App for VexApp {
 
         self.quick_open_overlay(&ctx);
         self.cmdline_overlay(&ctx);
+        if let Some(panel) = &mut self.keys_panel {
+            let script_maps: Vec<Mapping> =
+                self.vim.keymaps.maps.iter().filter(|m| m.origin == Origin::Script).cloned().collect();
+            let out = panel.show(&ctx, &mut self.keys, &script_maps);
+            if out.changed {
+                self.save_keybindings();
+            }
+            if out.close {
+                self.keys_panel = None;
+            }
+            if out.open_script {
+                self.open_init_script();
+            }
+        }
 
         // Keep egui widgets from holding keyboard focus; keys belong to the editor.
-        if self.quick_open.is_none() {
+        if self.quick_open.is_none() && self.keys_panel.is_none() {
             if let Some(id) = ctx.memory(|m| m.focused()) {
                 ctx.memory_mut(|m| m.surrender_focus(id));
             }
@@ -1246,26 +1424,36 @@ fn draw_trash_icon(p: &Painter, c: egui::Pos2, color: Color32) {
     p.add(Shape::line(body, st));
 }
 
+fn draw_gear_icon(p: &Painter, c: egui::Pos2, color: Color32) {
+    let st = Stroke::new(1.6, color);
+    p.circle_stroke(c, 3.5, st);
+    p.circle_stroke(c, 8.0, st);
+    for i in 0..8 {
+        let a = i as f32 * std::f32::consts::TAU / 8.0;
+        let dir = vec2(a.cos(), a.sin());
+        p.line_segment([c + dir * 8.0, c + dir * 11.0], Stroke::new(3.0, color));
+    }
+}
+
 fn draw_search_icon(p: &Painter, c: egui::Pos2, color: Color32) {
     let st = Stroke::new(1.6, color);
     p.circle_stroke(pos2(c.x + 2.0, c.y - 2.0), 7.0, st);
     p.line_segment([pos2(c.x - 3.0, c.y + 3.0), pos2(c.x - 9.0, c.y + 9.0)], Stroke::new(2.2, color));
 }
 
-fn draw_welcome(p: &Painter, rect: Rect, logo: &egui::TextureHandle) {
+fn draw_welcome(p: &Painter, rect: Rect, logo: &egui::TextureHandle, keys: &Keybindings) {
     let c = rect.center();
     let logo_rect = Rect::from_center_size(pos2(c.x, c.y - 130.0), vec2(112.0, 112.0));
     let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
     p.image(logo.id(), logo_rect, uv, Color32::WHITE);
-    let cmd = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
     let rows = [
-        ("Go to File", format!("{cmd} + P")),
+        ("Go to File", keys.label(Command::QuickOpen)),
         ("Command Line", ":".into()),
         ("Open File", ":e <path>".into()),
-        ("Toggle Sidebar", format!("{cmd} + B")),
-        ("Terminal", "Ctrl + `".into()),
-        ("Save", format!(":w  /  {cmd} + S")),
-        ("Quit", ":q".into()),
+        ("Toggle Sidebar", keys.label(Command::ToggleSidebar)),
+        ("Terminal", keys.label(Command::ToggleTerminal)),
+        ("Keyboard Shortcuts", keys.label(Command::Keybindings)),
+        ("Save", format!(":w  /  {}", keys.label(Command::Save))),
     ];
     for (i, (label, keys)) in rows.iter().enumerate() {
         let y = c.y - 30.0 + i as f32 * 26.0;

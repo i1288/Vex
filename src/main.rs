@@ -3,7 +3,10 @@
 
 mod app;
 mod buffer;
+mod commands;
 mod explorer;
+mod keymap;
+mod keys_panel;
 mod settings;
 mod snapshot;
 mod syntax;

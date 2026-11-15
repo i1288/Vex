@@ -67,12 +67,21 @@ scroll_off = 4
 "#;
 
 /// `$XDG_CONFIG_HOME/vex`, `%APPDATA%\vex` on Windows, else `~/.config/vex`.
-pub fn path() -> Option<PathBuf> {
+pub fn config_dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| if cfg!(windows) { std::env::var_os("APPDATA").map(PathBuf::from) } else { None })
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("vex").join("settings.toml"))
+    Some(base.join("vex"))
+}
+
+pub fn path() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("settings.toml"))
+}
+
+/// The vim-style startup script.
+pub fn init_script_path() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("init.vex"))
 }
 
 pub fn parse(text: &str) -> Result<Settings, String> {

@@ -65,6 +65,8 @@ The status bar badge shows the current mode: **NORMAL**, **INSERT**, **VISUAL** 
 | `:noh` | clear search highlight |
 | `:bn` `:bp` | next / previous tab |
 | `:set …` `:settings` | change options / open settings file |
+| `:nnoremap` `:inoremap` … `:source` | mappings and scripts (see below) |
+| `:terminal` `:files` `:sidebar` `:keybindings` | app commands |
 | `:vsp [file]` `:only` | split pane (side by side) / close other panes |
 
 | App shortcuts | |
@@ -78,10 +80,37 @@ The status bar badge shows the current mode: **NORMAL**, **INSERT**, **VISUAL** 
 | `Ctrl+Tab` / `Ctrl+PageDown` | next tab |
 | `Ctrl+=` `Ctrl+-` `Ctrl+0` | zoom editor font |
 | `Ctrl+,` | open settings |
+| `Ctrl+K` | keyboard shortcuts panel |
 | `Alt+Z` | toggle word wrap |
 | ``Ctrl+` `` | show / focus / hide the terminal |
 
 Yanks are copied to the system clipboard, and `Ctrl+V` pastes from it. In the editor, `Ctrl+C` copies the selection in visual mode and acts as `Esc` otherwise.
+
+## Custom shortcuts and mappings
+
+**Keyboard Shortcuts panel.** The gear icon at the bottom of the activity bar (or `Ctrl+K`, or `:keybindings`) opens a panel with two tabs:
+
+- **Shortcuts:** every app command and its keys. Click **Change**, press the keys you want, and it's saved. If those keys were used by another command, that command loses them and the panel tells you. **Reset** brings back the default.
+- **Vim Mappings:** make keys do something else without writing a script. Pick a mode, type what you press (like `<Space>w`) and what it should do (like `:w<CR>`). There are one-click examples to start from.
+
+Both are saved to `keybindings.toml` in the Vex config folder.
+
+**init.vex scripting.** For Vim users, `init.vex` in the same folder runs at startup like a `.vimrc`. Each line is a `:` command, and saving the file in Vex reloads it. The panel's **Open init.vex** button creates it with examples.
+
+```vim
+" ~/.config/vex/init.vex
+let mapleader = "<Space>"
+inoremap jk <Esc>
+nnoremap <Leader>w :w<CR>
+nnoremap <Leader>t :terminal<CR>
+nnoremap <Leader>f :files<CR>
+vnoremap < <gv
+set relativenumber
+```
+
+Supported: `map` / `noremap` and their `n`, `i`, `v`/`x` variants, `unmap`, `mapclear`, `let mapleader`, `source <file>`, `set`, and any other `:` command. Key notation: `<CR>` `<Esc>` `<Tab>` `<BS>` `<Space>` `<Leader>` `<C-x>` `<lt>` and the arrows. The same commands work at the `:` prompt for the current session. Running `:nmap` lists the active mappings.
+
+Commands useful in mappings: `:terminal`, `:files` (Go to File), `:sidebar`, `:keybindings`, `:vsplit`, `:w`.
 
 ## Terminal
 
@@ -120,6 +149,9 @@ src/
   syntax.rs    keyword-based syntax highlighting
   explorer.rs  file tree and fuzzy file finder
   settings.rs  settings file and :set options
+  keymap.rs    vim key notation and mapping table
+  commands.rs  app commands and configurable shortcuts
+  keys_panel.rs  the Keyboard Shortcuts panel
   theme.rs     Dark+ / Light+ palettes and fonts
   snapshot.rs  dev aid: VEX_SNAPSHOT=out.png VEX_KEYS='…' saves a screenshot
                (on Wayland, run it with WAYLAND_DISPLAY unset)

@@ -2,7 +2,7 @@
 //!
 //! `VEX_SNAPSHOT=out.png VEX_KEYS='jjdd<wait>:w<cr>' vex [path]`
 //!
-//! replays the keys as real input (`<esc> <cr> <bs> <tab> <c-x> <cs-x>`; `<wait>`
+//! replays the keys as real input (`<esc> <cr> <bs> <tab> <c-x> <cs-x> <click:x,y>`; `<wait>`
 //! lets a few frames pass, at least `VEX_SNAPSHOT_DELAY_MS`), saves a PNG of the
 //! window and exits.
 
@@ -20,6 +20,8 @@ pub struct Snapshot {
     delay: Duration,
     last_step: Instant,
     step: usize,
+    /// Events for the next frame, handed over in `App::raw_input_hook`.
+    queued: Vec<Event>,
 }
 
 impl Snapshot {
@@ -36,10 +38,16 @@ impl Snapshot {
             delay: Duration::from_millis(delay),
             last_step: Instant::now(),
             step: 0,
+            queued: Vec::new(),
         })
     }
 
-    /// Inject this frame's input; request the screenshot once all keys are in.
+    /// Input to inject before the next frame, as if it came from the OS.
+    pub fn take_events(&mut self) -> Vec<Event> {
+        std::mem::take(&mut self.queued)
+    }
+
+    /// Queue the next group of input; request the screenshot once all keys are in.
     pub fn tick(&mut self, ctx: &egui::Context) {
         self.frame += 1;
         ctx.request_repaint();
@@ -51,7 +59,7 @@ impl Snapshot {
         {
             let i = self.step - 1;
             if let Some(group) = self.groups.get(i) {
-                ctx.input_mut(|inp| inp.events.extend(group.iter().cloned()));
+                self.queued.extend(group.iter().cloned());
                 return;
             }
             if !self.requested && i >= self.groups.len() + 1 {
@@ -87,6 +95,18 @@ fn parse_keys(s: &str) -> Vec<Event> {
                     "bs" => Some(key_event(Key::Backspace, Modifiers::NONE)),
                     "tab" => Some(key_event(Key::Tab, Modifiers::NONE)),
                     "down" => Some(key_event(Key::ArrowDown, Modifiers::NONE)),
+                    n if n.starts_with("click:") => {
+                        let (x, y) = n[6..].split_once(',').unwrap_or(("0", "0"));
+                        let pos = egui::pos2(x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0));
+                        let button = |pressed| Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: Modifiers::NONE,
+                        };
+                        out.extend([Event::PointerMoved(pos), button(true)]);
+                        Some(button(false))
+                    }
                     n if n.starts_with("c-") || n.starts_with("cs-") => {
                         let (mods, k) = match n.strip_prefix("cs-") {
                             Some(k) => (Modifiers::COMMAND | Modifiers::SHIFT, k),
