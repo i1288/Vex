@@ -1,6 +1,7 @@
 mod app;
 mod buffer;
 mod explorer;
+mod settings;
 mod snapshot;
 mod syntax;
 mod theme;

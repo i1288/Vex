@@ -1,4 +1,6 @@
-//! Colors and fonts, modeled on VS Code's "Dark+" theme.
+//! Colors and fonts, modeled on VS Code's "Dark+" and "Light+" themes.
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use eframe::egui::{self, Color32, FontData, FontFamily, Stroke};
 use eframe::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
@@ -7,43 +9,150 @@ const fn hex(rgb: u32) -> Color32 {
     Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
 }
 
-pub const EDITOR_BG: Color32 = hex(0x1e1e1e);
-pub const SIDEBAR_BG: Color32 = hex(0x252526);
-pub const ACTIVITY_BG: Color32 = hex(0x333333);
-pub const TABS_BG: Color32 = hex(0x252526);
-pub const TAB_INACTIVE: Color32 = hex(0x2d2d2d);
-pub const STATUS_BG: Color32 = hex(0x007acc);
-pub const WIDGET_BG: Color32 = hex(0x252526);
-pub const INPUT_BG: Color32 = hex(0x3c3c3c);
-pub const BORDER: Color32 = hex(0x454545);
-pub const FOCUS_BORDER: Color32 = hex(0x007fd4);
+pub struct Palette {
+    pub dark: bool,
+    pub editor_bg: Color32,
+    pub sidebar_bg: Color32,
+    pub activity_bg: Color32,
+    pub tabs_bg: Color32,
+    pub tab_inactive: Color32,
+    pub status_bg: Color32,
+    pub widget_bg: Color32,
+    pub input_bg: Color32,
+    pub border: Color32,
+    pub focus_border: Color32,
 
-pub const TEXT: Color32 = hex(0xd4d4d4);
-pub const TEXT_UI: Color32 = hex(0xcccccc);
-pub const TEXT_MUTED: Color32 = hex(0x969696);
-pub const TEXT_BRIGHT: Color32 = hex(0xffffff);
-pub const ICON_INACTIVE: Color32 = hex(0x858585);
+    pub text: Color32,
+    pub text_ui: Color32,
+    pub text_muted: Color32,
+    pub text_bright: Color32,
+    /// Text on the status bar and activity bar, which stay dark/colored in both themes.
+    pub bar_fg: Color32,
+    pub icon_inactive: Color32,
 
-pub const LINE_NUMBER: Color32 = hex(0x858585);
-pub const LINE_NUMBER_ACTIVE: Color32 = hex(0xc6c6c6);
-pub const CURRENT_LINE: Color32 = hex(0x282828);
-pub const SELECTION: Color32 = hex(0x264f78);
-pub const SEARCH_MATCH: Color32 = Color32::from_rgba_premultiplied(0x50, 0x2a, 0x00, 0x55);
-pub const CURSOR: Color32 = hex(0xaeafad);
-pub const INDENT_GUIDE: Color32 = hex(0x404040);
-pub const LIST_HOVER: Color32 = hex(0x2a2d2e);
-pub const LIST_ACTIVE: Color32 = hex(0x37373d);
-pub const LIST_SELECTED: Color32 = hex(0x04395e);
+    pub line_number: Color32,
+    pub line_number_active: Color32,
+    pub current_line: Color32,
+    pub selection: Color32,
+    pub search_match: Color32,
+    pub search_border: Color32,
+    pub cursor: Color32,
+    pub indent_guide: Color32,
+    pub list_hover: Color32,
+    pub list_active: Color32,
+    pub list_selected: Color32,
+    pub tree_guide: Color32,
+    pub scrollbar: Color32,
 
-// Syntax colors.
-pub const KEYWORD: Color32 = hex(0x569cd6);
-pub const CONTROL: Color32 = hex(0xc586c0);
-pub const TYPE: Color32 = hex(0x4ec9b0);
-pub const FUNCTION: Color32 = hex(0xdcdcaa);
-pub const STRING: Color32 = hex(0xce9178);
-pub const NUMBER: Color32 = hex(0xb5cea8);
-pub const COMMENT: Color32 = hex(0x6a9955);
-pub const CONSTANT: Color32 = hex(0x4fc1ff);
+    pub keyword: Color32,
+    pub control: Color32,
+    pub type_: Color32,
+    pub function: Color32,
+    pub string: Color32,
+    pub number: Color32,
+    pub comment: Color32,
+    pub constant: Color32,
+
+}
+
+pub const DARK: Palette = Palette {
+    dark: true,
+    editor_bg: hex(0x1e1e1e),
+    sidebar_bg: hex(0x252526),
+    activity_bg: hex(0x333333),
+    tabs_bg: hex(0x252526),
+    tab_inactive: hex(0x2d2d2d),
+    status_bg: hex(0x007acc),
+    widget_bg: hex(0x252526),
+    input_bg: hex(0x3c3c3c),
+    border: hex(0x454545),
+    focus_border: hex(0x007fd4),
+    text: hex(0xd4d4d4),
+    text_ui: hex(0xcccccc),
+    text_muted: hex(0x969696),
+    text_bright: hex(0xffffff),
+    bar_fg: hex(0xffffff),
+    icon_inactive: hex(0x858585),
+    line_number: hex(0x858585),
+    line_number_active: hex(0xc6c6c6),
+    current_line: hex(0x282828),
+    selection: hex(0x264f78),
+    search_match: Color32::from_rgba_premultiplied(0x50, 0x2a, 0x00, 0x55),
+    search_border: hex(0x8a4b14),
+    cursor: hex(0xaeafad),
+    indent_guide: hex(0x404040),
+    list_hover: hex(0x2a2d2e),
+    list_active: hex(0x37373d),
+    list_selected: hex(0x04395e),
+    tree_guide: hex(0x454545),
+    scrollbar: hex(0x797979),
+    keyword: hex(0x569cd6),
+    control: hex(0xc586c0),
+    type_: hex(0x4ec9b0),
+    function: hex(0xdcdcaa),
+    string: hex(0xce9178),
+    number: hex(0xb5cea8),
+    comment: hex(0x6a9955),
+    constant: hex(0x4fc1ff),
+};
+
+pub const LIGHT: Palette = Palette {
+    dark: false,
+    editor_bg: hex(0xffffff),
+    sidebar_bg: hex(0xf3f3f3),
+    activity_bg: hex(0x2c2c2c),
+    tabs_bg: hex(0xf3f3f3),
+    tab_inactive: hex(0xececec),
+    status_bg: hex(0x007acc),
+    widget_bg: hex(0xf3f3f3),
+    input_bg: hex(0xffffff),
+    border: hex(0xc8c8c8),
+    focus_border: hex(0x0090f1),
+    text: hex(0x000000),
+    text_ui: hex(0x616161),
+    text_muted: hex(0x6f6f6f),
+    text_bright: hex(0x000000),
+    bar_fg: hex(0xffffff),
+    icon_inactive: hex(0x8a8a8a),
+    line_number: hex(0x237893),
+    line_number_active: hex(0x0b216f),
+    current_line: hex(0xeeeeee),
+    selection: hex(0xadd6ff),
+    search_match: Color32::from_rgba_premultiplied(0x9e, 0x3e, 0x00, 0x55),
+    search_border: hex(0xd18616),
+    cursor: hex(0x000000),
+    indent_guide: hex(0xd3d3d3),
+    list_hover: hex(0xe8e8e8),
+    list_active: hex(0xe4e6f1),
+    list_selected: hex(0xcce5ff),
+    tree_guide: hex(0xc8c8c8),
+    scrollbar: hex(0x646464),
+    keyword: hex(0x0000ff),
+    control: hex(0xaf00db),
+    type_: hex(0x267f99),
+    function: hex(0x795e26),
+    string: hex(0xa31515),
+    number: hex(0x098658),
+    comment: hex(0x008000),
+    constant: hex(0x0070c1),
+};
+
+static USE_LIGHT: AtomicBool = AtomicBool::new(false);
+
+/// The active palette.
+pub fn p() -> &'static Palette {
+    if USE_LIGHT.load(Ordering::Relaxed) { &LIGHT } else { &DARK }
+}
+
+/// Select a palette by name; returns false for an unknown name.
+pub fn set(name: &str) -> bool {
+    match name {
+        "dark" | "dark+" | "dark-plus" => USE_LIGHT.store(false, Ordering::Relaxed),
+        "light" | "light+" | "light-plus" => USE_LIGHT.store(true, Ordering::Relaxed),
+        _ => return false,
+    }
+    true
+}
 
 /// Status-bar badge color for each mode.
 pub fn mode_color(mode: crate::vim::Mode) -> Color32 {
@@ -72,20 +181,30 @@ pub fn file_color(name: &str) -> Color32 {
     }
 }
 
-pub fn apply(ctx: &egui::Context) {
-    let mut v = egui::Visuals::dark();
-    v.panel_fill = EDITOR_BG;
-    v.window_fill = WIDGET_BG;
-    v.window_stroke = Stroke::new(1.0, BORDER);
-    v.extreme_bg_color = INPUT_BG;
-    v.override_text_color = Some(TEXT_UI);
-    v.selection.bg_fill = SELECTION;
-    v.selection.stroke = Stroke::new(1.0, TEXT_BRIGHT);
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, hex(0x2b2b2b));
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, FOCUS_BORDER);
+/// Apply the active palette to egui's widget styling.
+pub fn apply_visuals(ctx: &egui::Context) {
+    let p = p();
+    let (theme, mut v) = if p.dark {
+        (egui::Theme::Dark, egui::Visuals::dark())
+    } else {
+        (egui::Theme::Light, egui::Visuals::light())
+    };
+    v.panel_fill = p.editor_bg;
+    v.window_fill = p.widget_bg;
+    v.window_stroke = Stroke::new(1.0, p.border);
+    v.extreme_bg_color = p.input_bg;
+    v.override_text_color = Some(p.text_ui);
+    v.selection.bg_fill = p.selection;
+    v.selection.stroke = Stroke::new(1.0, p.text_bright);
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.border.gamma_multiply(0.6));
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, p.focus_border);
     v.window_corner_radius = 6.into();
-    ctx.set_theme(egui::Theme::Dark);
-    ctx.set_visuals_of(egui::Theme::Dark, v);
+    ctx.set_theme(theme);
+    ctx.set_visuals_of(theme, v);
+}
+
+pub fn install(ctx: &egui::Context) {
+    apply_visuals(ctx);
     ctx.all_styles_mut(|s| {
         s.spacing.item_spacing = egui::vec2(0.0, 0.0);
         s.interaction.selectable_labels = false;

@@ -20,15 +20,15 @@ pub enum Tok {
 impl Tok {
     pub fn color(self) -> Color32 {
         match self {
-            Tok::Plain => theme::TEXT,
-            Tok::Keyword => theme::KEYWORD,
-            Tok::Control => theme::CONTROL,
-            Tok::Type => theme::TYPE,
-            Tok::Function => theme::FUNCTION,
-            Tok::Str => theme::STRING,
-            Tok::Number => theme::NUMBER,
-            Tok::Comment => theme::COMMENT,
-            Tok::Constant => theme::CONSTANT,
+            Tok::Plain => theme::p().text,
+            Tok::Keyword => theme::p().keyword,
+            Tok::Control => theme::p().control,
+            Tok::Type => theme::p().type_,
+            Tok::Function => theme::p().function,
+            Tok::Str => theme::p().string,
+            Tok::Number => theme::p().number,
+            Tok::Comment => theme::p().comment,
+            Tok::Constant => theme::p().constant,
         }
     }
 }

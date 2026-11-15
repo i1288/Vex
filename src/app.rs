@@ -9,15 +9,14 @@ use eframe::egui::{
     Painter, Rect, Sense, Shape, Stroke, Ui,
 };
 
-use crate::buffer::{Buffer, Pos, TAB_WIDTH};
+use crate::buffer::{self, tab_size, Buffer, Pos};
 use crate::explorer::{self, Explorer};
+use crate::settings::{self, Settings};
 use crate::syntax;
 use crate::theme;
 use crate::vim::{self, Action, Key, Mode, Vim};
 
 const UI_SIZE: f32 = 13.0;
-const DEFAULT_FONT_SIZE: f32 = 14.0;
-const SCROLL_OFF: usize = 4;
 
 struct QuickOpen {
     query: String,
@@ -33,7 +32,8 @@ pub struct VexApp {
     vim: Vim,
     explorer: Explorer,
     show_sidebar: bool,
-    font_size: f32,
+    settings: Settings,
+    ctx: egui::Context,
     quick_open: Option<QuickOpen>,
     drag_anchor: Option<Pos>,
     follow_cursor: bool,
@@ -44,7 +44,7 @@ pub struct VexApp {
 
 impl VexApp {
     pub fn new(cc: &eframe::CreationContext<'_>, root: PathBuf, file: Option<PathBuf>) -> Self {
-        theme::apply(&cc.egui_ctx);
+        theme::install(&cc.egui_ctx);
         let mut app = Self {
             tabs: Vec::new(),
             active: 0,
@@ -52,7 +52,8 @@ impl VexApp {
             vim: Vim::default(),
             explorer: Explorer::new(root),
             show_sidebar: true,
-            font_size: DEFAULT_FONT_SIZE,
+            settings: Settings::default(),
+            ctx: cc.egui_ctx.clone(),
             quick_open: None,
             drag_anchor: None,
             follow_cursor: true,
@@ -60,10 +61,58 @@ impl VexApp {
             allow_close: false,
             snapshot: crate::snapshot::Snapshot::from_env(),
         };
+        app.reload_settings(&cc.egui_ctx);
         if let Some(f) = file {
             app.open(&f);
         }
         app
+    }
+
+    /// Re-read the settings file and apply it.
+    fn reload_settings(&mut self, ctx: &egui::Context) -> bool {
+        match settings::load() {
+            Ok(s) => {
+                self.settings = s;
+                self.apply_settings(ctx);
+                true
+            }
+            Err(e) => {
+                self.error(e);
+                false
+            }
+        }
+    }
+
+    fn apply_settings(&mut self, ctx: &egui::Context) {
+        self.settings.apply_globals();
+        theme::apply_visuals(ctx);
+        self.follow_cursor = true;
+    }
+
+    fn set_options(&mut self, ctx: &egui::Context, args: &str) {
+        if args.trim().is_empty() {
+            let msg = self.settings.summary();
+            self.info(msg);
+            return;
+        }
+        for arg in args.split_whitespace() {
+            match self.settings.set(arg) {
+                Ok(Some(msg)) => self.info(msg),
+                Ok(None) => {}
+                Err(e) => {
+                    self.error(e);
+                    break;
+                }
+            }
+        }
+        self.apply_settings(ctx);
+    }
+
+    fn open_settings(&mut self) {
+        match settings::ensure_file() {
+            Ok(p) => self.open(&p),
+            Err(e) => self.error(format!("Cannot create settings file: {e}")),
+        }
     }
 
     fn info(&mut self, msg: impl Into<String>) {
@@ -154,8 +203,12 @@ impl VexApp {
         match buf.save() {
             Ok(bytes) => {
                 let msg = format!("\"{}\" {}L, {}B written", buf.name(), buf.line_count(), bytes);
+                let is_settings = buf.path.is_some() && buf.path == settings::path();
                 self.info(msg);
                 self.explorer.refresh();
+                if is_settings && self.reload_settings(&self.ctx.clone()) {
+                    self.info("Settings applied");
+                }
                 true
             }
             Err(e) => {
@@ -213,6 +266,8 @@ impl VexApp {
             Action::Edit(p) => self.open(Path::new(&p)),
             Action::NextTab => self.cycle_tab(1),
             Action::PrevTab => self.cycle_tab(-1),
+            Action::Set(args) => self.set_options(ctx, &args),
+            Action::OpenSettings => self.open_settings(),
         }
     }
 
@@ -256,9 +311,12 @@ impl VexApp {
             EKey::B => self.show_sidebar = !self.show_sidebar,
             EKey::Tab | EKey::PageDown if !shift => self.cycle_tab(1),
             EKey::Tab | EKey::PageUp => self.cycle_tab(-1),
-            EKey::Equals | EKey::Plus => self.font_size = (self.font_size + 1.0).min(32.0),
-            EKey::Minus => self.font_size = (self.font_size - 1.0).max(8.0),
-            EKey::Num0 => self.font_size = DEFAULT_FONT_SIZE,
+            EKey::Equals | EKey::Plus => self.settings.font_size = (self.settings.font_size + 1.0).min(48.0),
+            EKey::Minus => self.settings.font_size = (self.settings.font_size - 1.0).max(6.0),
+            EKey::Num0 => {
+                self.settings.font_size = settings::load().map_or(Settings::default().font_size, |s| s.font_size);
+            }
+            EKey::Comma => self.open_settings(),
             _ => return false,
         }
         ctx.request_repaint();
@@ -357,9 +415,9 @@ impl VexApp {
         let r = icon(0);
         let resp = ui.interact(r, ui.scope_id().with("act-explorer"), Sense::click());
         let active = self.show_sidebar;
-        let color = if active || resp.hovered() { theme::TEXT_BRIGHT } else { theme::ICON_INACTIVE };
+        let color = if active || resp.hovered() { theme::p().bar_fg } else { theme::p().icon_inactive };
         if active {
-            painter.rect_filled(Rect::from_min_size(r.min, vec2(2.0, 48.0)), 0.0, theme::TEXT_BRIGHT);
+            painter.rect_filled(Rect::from_min_size(r.min, vec2(2.0, 48.0)), 0.0, theme::p().bar_fg);
         }
         draw_files_icon(painter, r.center(), color);
         if resp.clicked() {
@@ -369,7 +427,7 @@ impl VexApp {
 
         let r = icon(1);
         let resp = ui.interact(r, ui.scope_id().with("act-search"), Sense::click());
-        let color = if self.quick_open.is_some() || resp.hovered() { theme::TEXT_BRIGHT } else { theme::ICON_INACTIVE };
+        let color = if self.quick_open.is_some() || resp.hovered() { theme::p().bar_fg } else { theme::p().icon_inactive };
         draw_search_icon(painter, r.center(), color);
         if resp.clicked() {
             self.shortcut(ui.ctx(), EKey::P, false);
@@ -385,18 +443,18 @@ impl VexApp {
             Align2::LEFT_CENTER,
             "EXPLORER",
             FontId::proportional(11.0),
-            theme::TEXT_UI,
+            theme::p().text_ui,
         );
 
         let (r, resp) = ui.allocate_exact_size(vec2(w, 22.0), Sense::click());
         let painter = ui.painter();
-        draw_chevron(painter, pos2(r.left() + 12.0, r.center().y), true, theme::TEXT_UI);
+        draw_chevron(painter, pos2(r.left() + 12.0, r.center().y), true, theme::p().text_ui);
         painter.text(
             r.left_center() + vec2(22.0, 0.0),
             Align2::LEFT_CENTER,
             self.explorer.root_name().to_uppercase(),
             FontId::proportional(11.0),
-            theme::TEXT_UI,
+            theme::p().text_ui,
         );
         if resp.on_hover_text("Click to refresh").clicked() {
             self.explorer.refresh();
@@ -411,18 +469,18 @@ impl VexApp {
                 let painter = ui.painter();
                 let is_active = active_path.as_ref() == Some(&row.entry.path);
                 if is_active {
-                    painter.rect_filled(r, 0.0, theme::LIST_ACTIVE);
+                    painter.rect_filled(r, 0.0, theme::p().list_active);
                 } else if resp.hovered() {
-                    painter.rect_filled(r, 0.0, theme::LIST_HOVER);
+                    painter.rect_filled(r, 0.0, theme::p().list_hover);
                 }
                 let x = r.left() + 8.0 + row.depth as f32 * 12.0;
                 // Indent guides, like VS Code's tree.
                 for d in 0..row.depth {
                     let gx = r.left() + 8.0 + d as f32 * 12.0 + 7.0;
-                    painter.line_segment([pos2(gx, r.top()), pos2(gx, r.bottom())], Stroke::new(1.0, Color32::from_gray(0x45)));
+                    painter.line_segment([pos2(gx, r.top()), pos2(gx, r.bottom())], Stroke::new(1.0, theme::p().tree_guide));
                 }
                 if row.entry.is_dir {
-                    draw_chevron(painter, pos2(x + 7.0, r.center().y), row.expanded, theme::TEXT_UI);
+                    draw_chevron(painter, pos2(x + 7.0, r.center().y), row.expanded, theme::p().text_ui);
                 } else {
                     draw_file_icon(painter, pos2(x + 8.0, r.center().y), theme::file_color(&row.entry.name));
                 }
@@ -431,7 +489,7 @@ impl VexApp {
                     Align2::LEFT_CENTER,
                     &row.entry.name,
                     FontId::proportional(UI_SIZE),
-                    theme::TEXT_UI,
+                    theme::p().text_ui,
                 );
                 if resp.clicked() {
                     clicked = Some((row.entry.path.clone(), row.entry.is_dir));
@@ -448,22 +506,22 @@ impl VexApp {
     fn tab_bar(&mut self, ui: &mut Ui) {
         let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 35.0), Sense::hover());
         let painter = ui.painter_at(bar);
-        painter.rect_filled(bar, 0.0, theme::TABS_BG);
+        painter.rect_filled(bar, 0.0, theme::p().tabs_bg);
         let mut x = bar.left();
         let mut action: Option<(usize, bool)> = None; // (index, close)
         for (i, b) in self.tabs.iter().enumerate() {
             let active = i == self.active;
-            let name = galley(ui.ctx(), b.name(), UI_SIZE, if active { theme::TEXT_BRIGHT } else { theme::TEXT_MUTED });
+            let name = galley(ui.ctx(), b.name(), UI_SIZE, if active { theme::p().text_bright } else { theme::p().text_muted });
             let w = 12.0 + 16.0 + 4.0 + name.size().x + 8.0 + 20.0 + 6.0;
             let r = Rect::from_min_size(pos2(x, bar.top()), vec2(w, bar.height()));
             let resp = ui.interact(r, ui.scope_id().with(("tab", i)), Sense::click());
-            painter.rect_filled(r, 0.0, if active { theme::EDITOR_BG } else { theme::TAB_INACTIVE });
-            painter.line_segment([r.right_top(), r.right_bottom()], Stroke::new(1.0, theme::TABS_BG));
+            painter.rect_filled(r, 0.0, if active { theme::p().editor_bg } else { theme::p().tab_inactive });
+            painter.line_segment([r.right_top(), r.right_bottom()], Stroke::new(1.0, theme::p().tabs_bg));
             if active {
-                painter.line_segment([r.left_top(), r.right_top()], Stroke::new(1.0, theme::STATUS_BG));
+                painter.line_segment([r.left_top(), r.right_top()], Stroke::new(1.0, theme::p().status_bg));
             }
             draw_file_icon(&painter, pos2(r.left() + 20.0, r.center().y), theme::file_color(&b.name()));
-            painter.galley(pos2(r.left() + 32.0, r.center().y - name.size().y / 2.0), name, theme::TEXT_UI);
+            painter.galley(pos2(r.left() + 32.0, r.center().y - name.size().y / 2.0), name, theme::p().text_ui);
 
             let close = Rect::from_center_size(pos2(r.right() - 16.0, r.center().y), vec2(20.0, 20.0));
             let close_resp = ui.interact(close, ui.scope_id().with(("tab-close", i)), Sense::click());
@@ -471,9 +529,9 @@ impl VexApp {
                 painter.rect_filled(close, CornerRadius::same(4), Color32::from_gray(0x50));
             }
             if b.dirty && !close_resp.hovered() {
-                painter.circle_filled(close.center(), 4.0, theme::TEXT_UI);
+                painter.circle_filled(close.center(), 4.0, theme::p().text_ui);
             } else if active || resp.hovered() || close_resp.hovered() {
-                draw_x(&painter, close.center(), 4.0, theme::TEXT_UI);
+                draw_x(&painter, close.center(), 4.0, theme::p().text_ui);
             }
             if close_resp.clicked() || resp.middle_clicked() {
                 action = Some((i, true));
@@ -494,7 +552,7 @@ impl VexApp {
     fn breadcrumbs(&mut self, ui: &mut Ui) {
         let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
         let painter = ui.painter_at(r);
-        painter.rect_filled(r, 0.0, theme::EDITOR_BG);
+        painter.rect_filled(r, 0.0, theme::p().editor_bg);
         let Some(path) = self.tabs.get(self.active).and_then(|b| b.path.as_ref()) else { return };
         let rel = path.strip_prefix(&self.explorer.root).unwrap_or(path);
         let parts: Vec<String> = rel.iter().map(|p| p.to_string_lossy().into_owned()).collect();
@@ -505,10 +563,10 @@ impl VexApp {
                 draw_file_icon(&painter, pos2(x + 6.0, r.center().y), theme::file_color(part));
                 x += 16.0;
             }
-            let rect = painter.text(pos2(x, r.center().y), Align2::LEFT_CENTER, part, FontId::proportional(UI_SIZE), theme::TEXT_MUTED);
+            let rect = painter.text(pos2(x, r.center().y), Align2::LEFT_CENTER, part, FontId::proportional(UI_SIZE), theme::p().text_muted);
             x = rect.right() + 6.0;
             if !last {
-                draw_chevron(&painter, pos2(x + 3.0, r.center().y), false, theme::TEXT_MUTED);
+                draw_chevron(&painter, pos2(x + 3.0, r.center().y), false, theme::p().text_muted);
                 x += 14.0;
             }
         }
@@ -518,7 +576,7 @@ impl VexApp {
         let rect = ui.max_rect();
         let painter = ui.painter();
         let font = FontId::proportional(12.0);
-        let white = theme::TEXT_BRIGHT;
+        let white = theme::p().bar_fg;
 
         // Left: mode badge, then message.
         let mode = self.vim.mode;
@@ -547,7 +605,7 @@ impl VexApp {
             items.push(syntax::language_name(&b.extension()).to_string());
             items.push("LF".into());
             items.push("UTF-8".into());
-            items.push("Spaces: 4".into());
+            items.push(if buffer::expand_tab() { format!("Spaces: {}", tab_size()) } else { format!("Tab Size: {}", tab_size()) });
             match self.vim.selection(b) {
                 Some((a, e)) if mode == Mode::VisualLine => items.push(format!("{} lines", e.line - a.line + 1)),
                 Some((a, e)) => items.push(format!("({} selected)", b.slice(a, e).chars().count() + 1)),
@@ -572,20 +630,22 @@ impl VexApp {
         let rect = ui.available_rect_before_wrap();
         let resp = ui.allocate_rect(rect, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, theme::EDITOR_BG);
+        painter.rect_filled(rect, 0.0, theme::p().editor_bg);
         if self.tabs.is_empty() {
             draw_welcome(&painter, rect);
             return;
         }
         let ctx = ui.ctx().clone();
-        let font = FontId::monospace(self.font_size);
+        let st = self.settings.clone();
+        let font = FontId::monospace(st.font_size);
         let char_w = ctx.fonts_mut(|f| f.glyph_width(&font, 'M'));
-        let line_h = (self.font_size * 1.4).round();
+        let line_h = (st.font_size * 1.4).round();
         let buf = &mut self.tabs[self.active];
         let vim = &mut self.vim;
 
         let digits = buf.line_count().to_string().len().max(3);
-        let gutter_w = 18.0 + digits as f32 * char_w + 26.0;
+        let show_numbers = st.line_numbers || st.relative_line_numbers;
+        let gutter_w = if show_numbers { 18.0 + digits as f32 * char_w + 26.0 } else { 14.0 };
         let text_rect = Rect::from_min_max(pos2(rect.left() + gutter_w, rect.top()), rect.max);
         let text_x0 = text_rect.left() + 4.0;
         vim.page_lines = ((rect.height() / line_h) as usize).max(1);
@@ -599,7 +659,7 @@ impl VexApp {
         }
         if self.follow_cursor {
             self.follow_cursor = false;
-            let so = (SCROLL_OFF as f32 * line_h).min(rect.height() / 3.0);
+            let so = (st.scroll_off as f32 * line_h).min(rect.height() / 3.0);
             let cy = buf.cursor.line as f32 * line_h;
             if cy - so < buf.scroll_y {
                 buf.scroll_y = cy - so;
@@ -675,7 +735,7 @@ impl VexApp {
             let row = Rect::from_min_size(pos2(text_rect.left(), y), vec2(text_rect.width(), line_h));
 
             if l == buf.cursor.line && selection.is_none() {
-                text_painter.rect_stroke(row.shrink(1.0), 0.0, Stroke::new(2.0, theme::CURRENT_LINE), egui::StrokeKind::Inside);
+                text_painter.rect_stroke(row.shrink(1.0), 0.0, Stroke::new(2.0, theme::p().current_line), egui::StrokeKind::Inside);
             }
             if let Some((a, b)) = selection {
                 if (a.line..=b.line).contains(&l) {
@@ -688,7 +748,7 @@ impl VexApp {
                         let ve = if e > len { buf.visual_col(l, len) + 1 } else { buf.visual_col(l, e) };
                         (x_of(buf.visual_col(l, s.min(len))), x_of(ve))
                     };
-                    text_painter.rect_filled(Rect::from_x_y_ranges(x0..=x1, y..=y + line_h), 0.0, theme::SELECTION);
+                    text_painter.rect_filled(Rect::from_x_y_ranges(x0..=x1, y..=y + line_h), 0.0, theme::p().selection);
                 }
             }
             if let Some(re) = &search {
@@ -697,16 +757,16 @@ impl VexApp {
                         x_of(buf.visual_col(l, s))..=x_of(buf.visual_col(l, e)),
                         y + 1.0..=y + line_h - 1.0,
                     );
-                    text_painter.rect_filled(r, 2.0, theme::SEARCH_MATCH);
-                    text_painter.rect_stroke(r, 2.0, Stroke::new(1.0, Color32::from_rgb(0x8a, 0x4b, 0x14)), egui::StrokeKind::Inside);
+                    text_painter.rect_filled(r, 2.0, theme::p().search_match);
+                    text_painter.rect_stroke(r, 2.0, Stroke::new(1.0, theme::p().search_border), egui::StrokeKind::Inside);
                 }
             }
 
             // Indent guides.
-            let indent = indent_width(buf, l);
-            for k in 0..indent / TAB_WIDTH {
-                let gx = x_of(k * TAB_WIDTH).round() + 0.5;
-                text_painter.line_segment([pos2(gx, y), pos2(gx, y + line_h)], Stroke::new(1.0, theme::INDENT_GUIDE));
+            let indent = if st.indent_guides { indent_width(buf, l) } else { 0 };
+            for k in 0..indent / tab_size() {
+                let gx = x_of(k * tab_size()).round() + 0.5;
+                text_painter.line_segment([pos2(gx, y), pos2(gx, y + line_h)], Stroke::new(1.0, theme::p().indent_guide));
             }
 
             // Text.
@@ -720,7 +780,7 @@ impl VexApp {
                 let mut text = String::new();
                 for &c in &line[s..e] {
                     if c == '\t' {
-                        let w = TAB_WIDTH - v % TAB_WIDTH;
+                        let w = tab_size() - v % tab_size();
                         text.extend(std::iter::repeat_n(' ', w));
                         v += w;
                     } else {
@@ -732,17 +792,27 @@ impl VexApp {
             }
             let g = ctx.fonts_mut(|f| f.layout_job(job));
             let gy = y + (line_h - g.size().y) / 2.0;
-            text_painter.galley(pos2(text_x0 - scroll_x, gy), g, theme::TEXT);
+            text_painter.galley(pos2(text_x0 - scroll_x, gy), g, theme::p().text);
 
-            // Line number.
-            let num_color = if l == buf.cursor.line { theme::LINE_NUMBER_ACTIVE } else { theme::LINE_NUMBER };
-            painter.text(
-                pos2(rect.left() + 18.0 + digits as f32 * char_w, y + line_h / 2.0),
-                Align2::RIGHT_CENTER,
-                (l + 1).to_string(),
-                font.clone(),
-                num_color,
-            );
+            // Line number: absolute, or distance from the cursor line.
+            if show_numbers {
+                let cur = buf.cursor.line;
+                let (num, color) = if l == cur {
+                    let n = if st.line_numbers { l + 1 } else { 0 };
+                    (n, theme::p().line_number_active)
+                } else if st.relative_line_numbers {
+                    (l.abs_diff(cur), theme::p().line_number)
+                } else {
+                    (l + 1, theme::p().line_number)
+                };
+                painter.text(
+                    pos2(rect.left() + 18.0 + digits as f32 * char_w, y + line_h / 2.0),
+                    Align2::RIGHT_CENTER,
+                    num.to_string(),
+                    font.clone(),
+                    color,
+                );
+            }
         }
 
         // Cursor.
@@ -752,22 +822,22 @@ impl VexApp {
             let len = line.len();
             let vx = buf.visual_col(c.line, c.col.min(len));
             let ch = line.get(c.col).copied();
-            let cells = if ch == Some('\t') { TAB_WIDTH - vx % TAB_WIDTH } else { 1 };
+            let cells = if ch == Some('\t') { tab_size() - vx % tab_size() } else { 1 };
             let y = y_of(c.line);
             let x = x_of(vx);
             match vim.mode {
                 Mode::Insert => {
-                    text_painter.rect_filled(Rect::from_min_size(pos2(x - 1.0, y), vec2(2.0, line_h)), 0.0, theme::CURSOR);
+                    text_painter.rect_filled(Rect::from_min_size(pos2(x - 1.0, y), vec2(2.0, line_h)), 0.0, theme::p().cursor);
                 }
                 Mode::Command | Mode::Search => {
                     let r = Rect::from_min_size(pos2(x, y), vec2(char_w * cells as f32, line_h));
-                    text_painter.rect_stroke(r, 0.0, Stroke::new(1.0, theme::CURSOR), egui::StrokeKind::Inside);
+                    text_painter.rect_stroke(r, 0.0, Stroke::new(1.0, theme::p().cursor), egui::StrokeKind::Inside);
                 }
                 _ => {
                     let r = Rect::from_min_size(pos2(x, y), vec2(char_w * cells as f32, line_h));
-                    text_painter.rect_filled(r, 0.0, theme::CURSOR);
+                    text_painter.rect_filled(r, 0.0, theme::p().cursor);
                     if let Some(ch) = ch.filter(|c| !c.is_whitespace()) {
-                        text_painter.text(pos2(x, y + line_h / 2.0), Align2::LEFT_CENTER, ch, font.clone(), theme::EDITOR_BG);
+                        text_painter.text(pos2(x, y + line_h / 2.0), Align2::LEFT_CENTER, ch, font.clone(), theme::p().editor_bg);
                     }
                 }
             }
@@ -786,9 +856,10 @@ impl VexApp {
             let ty = rect.top() + buf.scroll_y / max_scroll.max(1.0) * range;
             let thumb = Rect::from_min_size(pos2(track.left(), ty), vec2(14.0, thumb_h));
             let alpha = if sresp.dragged() || sresp.hovered() { 0x90 } else { 0x50 };
-            painter.rect_filled(thumb, 0.0, Color32::from_rgba_unmultiplied(0x79, 0x79, 0x79, alpha));
+            let sb = theme::p().scrollbar;
+            painter.rect_filled(thumb, 0.0, Color32::from_rgba_unmultiplied(sb.r(), sb.g(), sb.b(), alpha));
             let my = rect.top() + buf.cursor.line as f32 / buf.line_count().max(1) as f32 * rect.height();
-            painter.rect_filled(Rect::from_min_size(pos2(track.left(), my), vec2(14.0, 2.0)), 0.0, theme::CURSOR);
+            painter.rect_filled(Rect::from_min_size(pos2(track.left(), my), vec2(14.0, 2.0)), 0.0, theme::p().cursor);
         }
     }
 
@@ -840,27 +911,27 @@ impl VexApp {
             ui.add_space(4.0);
             if matches.is_empty() {
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new("  No matching files").color(theme::TEXT_MUTED));
+                ui.label(egui::RichText::new("  No matching files").color(theme::p().text_muted));
                 ui.add_space(4.0);
             }
             for (i, (_, path)) in matches.iter().enumerate() {
                 let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
                 let painter = ui.painter();
                 if i == qo.selected {
-                    painter.rect_filled(r, CornerRadius::same(3), theme::LIST_SELECTED);
+                    painter.rect_filled(r, CornerRadius::same(3), theme::p().list_selected);
                 } else if resp.hovered() {
-                    painter.rect_filled(r, CornerRadius::same(3), theme::LIST_HOVER);
+                    painter.rect_filled(r, CornerRadius::same(3), theme::p().list_hover);
                 }
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 draw_file_icon(painter, pos2(r.left() + 14.0, r.center().y), theme::file_color(&name));
-                let nr = painter.text(pos2(r.left() + 26.0, r.center().y), Align2::LEFT_CENTER, &name, FontId::proportional(UI_SIZE), theme::TEXT_BRIGHT);
+                let nr = painter.text(pos2(r.left() + 26.0, r.center().y), Align2::LEFT_CENTER, &name, FontId::proportional(UI_SIZE), theme::p().text_bright);
                 if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
                     painter.text(
                         pos2(nr.right() + 8.0, r.center().y),
                         Align2::LEFT_CENTER,
                         dir.to_string_lossy(),
                         FontId::proportional(12.0),
-                        theme::TEXT_MUTED,
+                        theme::p().text_muted,
                     );
                 }
                 if resp.clicked() {
@@ -891,17 +962,17 @@ impl VexApp {
         overlay_frame(ctx, "cmdline", |ui| {
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::hover());
             let painter = ui.painter();
-            painter.rect(r, CornerRadius::same(2), theme::INPUT_BG, Stroke::new(1.0, theme::FOCUS_BORDER), egui::StrokeKind::Inside);
-            let tr = painter.text(pos2(r.left() + 8.0, r.center().y), Align2::LEFT_CENTER, &text, font.clone(), theme::TEXT_BRIGHT);
+            painter.rect(r, CornerRadius::same(2), theme::p().input_bg, Stroke::new(1.0, theme::p().focus_border), egui::StrokeKind::Inside);
+            let tr = painter.text(pos2(r.left() + 8.0, r.center().y), Align2::LEFT_CENTER, &text, font.clone(), theme::p().text_bright);
             let cw = ctx.fonts_mut(|f| f.glyph_width(&font, 'M'));
-            painter.rect_filled(Rect::from_min_size(pos2(tr.right() + 1.0, r.center().y - 9.0), vec2(cw, 18.0)), 0.0, theme::CURSOR);
+            painter.rect_filled(Rect::from_min_size(pos2(tr.right() + 1.0, r.center().y - 9.0), vec2(cw, 18.0)), 0.0, theme::p().cursor);
             let hint = if prefix == ":" {
                 "w  save  ·  q  close  ·  wq  save+close  ·  e <file>  open  ·  %s/a/b/g  replace  ·  <N>  go to line"
             } else {
                 "Enter to search  ·  n / N  next / previous  ·  :noh  clear highlight"
             };
             ui.add_space(4.0);
-            ui.label(egui::RichText::new(hint).size(11.5).color(theme::TEXT_MUTED));
+            ui.label(egui::RichText::new(hint).size(11.5).color(theme::p().text_muted));
         });
     }
 }
@@ -919,19 +990,19 @@ impl eframe::App for VexApp {
         egui::Panel::bottom("status")
             .exact_size(22.0)
             .resizable(false)
-            .frame(Frame::NONE.fill(theme::STATUS_BG))
+            .frame(Frame::NONE.fill(theme::p().status_bg))
             .show(ui, |ui| self.status_bar(ui));
         egui::Panel::left("activity")
             .exact_size(48.0)
             .resizable(false)
-            .frame(Frame::NONE.fill(theme::ACTIVITY_BG))
+            .frame(Frame::NONE.fill(theme::p().activity_bg))
             .show(ui, |ui| self.activity_bar(ui));
         if self.show_sidebar {
             egui::Panel::left("sidebar")
                 .default_size(250.0)
                 .size_range(160.0..=600.0)
                 .resizable(true)
-                .frame(Frame::NONE.fill(theme::SIDEBAR_BG))
+                .frame(Frame::NONE.fill(theme::p().sidebar_bg))
                 .show(ui, |ui| self.sidebar(ui));
         }
         egui::CentralPanel::no_frame().show(ui, |ui| {
@@ -968,8 +1039,8 @@ fn overlay_frame(ctx: &egui::Context, id: &str, add: impl FnOnce(&mut Ui)) {
         .fade_in(false)
         .show(ctx, |ui| {
             Frame::NONE
-                .fill(theme::WIDGET_BG)
-                .stroke(Stroke::new(1.0, theme::BORDER))
+                .fill(theme::p().widget_bg)
+                .stroke(Stroke::new(1.0, theme::p().border))
                 .corner_radius(6)
                 .inner_margin(6)
                 .shadow(egui::Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(140) })
@@ -1034,7 +1105,7 @@ fn draw_files_icon(p: &Painter, c: egui::Pos2, color: Color32) {
     p.line_segment([back.right_top(), back.right_bottom()], st);
     p.line_segment([back.left_top(), pos2(back.left(), front.top())], st);
     p.line_segment([back.right_bottom(), pos2(front.right(), back.bottom())], st);
-    p.rect_filled(front, 0.0, theme::ACTIVITY_BG);
+    p.rect_filled(front, 0.0, theme::p().activity_bg);
     p.rect_stroke(front, 1.0, st, egui::StrokeKind::Middle);
 }
 
@@ -1058,7 +1129,7 @@ fn draw_welcome(p: &Painter, rect: Rect) {
     ];
     for (i, (label, keys)) in rows.iter().enumerate() {
         let y = c.y - 30.0 + i as f32 * 26.0;
-        p.text(pos2(c.x - 10.0, y), Align2::RIGHT_CENTER, *label, FontId::proportional(13.0), theme::TEXT_MUTED);
-        p.text(pos2(c.x + 10.0, y), Align2::LEFT_CENTER, *keys, FontId::monospace(12.5), theme::TEXT_UI);
+        p.text(pos2(c.x - 10.0, y), Align2::RIGHT_CENTER, *label, FontId::proportional(13.0), theme::p().text_muted);
+        p.text(pos2(c.x + 10.0, y), Align2::LEFT_CENTER, *keys, FontId::monospace(12.5), theme::p().text_ui);
     }
 }

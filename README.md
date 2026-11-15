@@ -48,6 +48,7 @@ The status bar badge shows the current mode: **NORMAL**, **INSERT**, **VISUAL** 
 | `:s/a/b/g` `:%s/a/b/gi` | replace (regex; `$1`/`\1` groups, `\n` splits lines) |
 | `:noh` | clear search highlight |
 | `:bn` `:bp` | next / previous tab |
+| `:set …` `:settings` | change options / open settings file |
 
 | App shortcuts | |
 |---|---|
@@ -57,8 +58,27 @@ The status bar badge shows the current mode: **NORMAL**, **INSERT**, **VISUAL** 
 | `Ctrl+B` | toggle sidebar |
 | `Ctrl+Tab` / `Ctrl+PageDown` | next tab |
 | `Ctrl+=` `Ctrl+-` `Ctrl+0` | zoom editor font |
+| `Ctrl+,` | open settings |
 
 Yanks are copied to the system clipboard, and `Ctrl+V` pastes from it.
+
+## Settings
+
+`:settings` (or `Ctrl+,`) opens `~/.config/vex/settings.toml`. Saving it applies the changes right away:
+
+```toml
+theme = "dark"              # or "light"
+font_size = 14.0
+tab_size = 4
+insert_spaces = true
+line_numbers = true
+relative_line_numbers = false
+indent_guides = true
+scroll_off = 4
+```
+
+`:set` changes options for the current session only, like Vim:
+`:set ts=2`, `:set noet`, `:set rnu`, `:set nu!` (toggle), `:set ts?` (show), `:set` (show all), `:colorscheme light`.
 
 ## Layout
 
@@ -70,7 +90,8 @@ src/
   buffer.rs    text buffer, file I/O, undo/redo
   syntax.rs    keyword-based syntax highlighting
   explorer.rs  file tree and fuzzy file finder
-  theme.rs     Dark+ colors and fonts
+  settings.rs  settings file and :set options
+  theme.rs     Dark+ / Light+ palettes and fonts
   snapshot.rs  dev aid: VEX_SNAPSHOT=out.png VEX_KEYS='…' saves a screenshot
 ```
 

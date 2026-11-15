@@ -3,8 +3,30 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-pub const TAB_WIDTH: usize = 4;
+static TAB_SIZE: AtomicUsize = AtomicUsize::new(4);
+static EXPAND_TAB: AtomicBool = AtomicBool::new(true);
+
+/// Display width of a tab, and the width of one indent level.
+pub fn tab_size() -> usize {
+    TAB_SIZE.load(Ordering::Relaxed)
+}
+
+/// Whether indenting inserts spaces rather than a tab character.
+pub fn expand_tab() -> bool {
+    EXPAND_TAB.load(Ordering::Relaxed)
+}
+
+pub fn set_indent(size: usize, expand: bool) {
+    TAB_SIZE.store(size.clamp(1, 16), Ordering::Relaxed);
+    EXPAND_TAB.store(expand, Ordering::Relaxed);
+}
+
+/// One level of indentation as text.
+pub fn indent_unit() -> String {
+    if expand_tab() { " ".repeat(tab_size()) } else { "\t".into() }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Pos {
@@ -175,7 +197,7 @@ impl Buffer {
     pub fn visual_col(&self, line: usize, col: usize) -> usize {
         let mut v = 0;
         for c in self.lines[line].iter().take(col) {
-            v += if *c == '\t' { TAB_WIDTH - v % TAB_WIDTH } else { 1 };
+            v += if *c == '\t' { tab_size() - v % tab_size() } else { 1 };
         }
         v
     }
@@ -184,7 +206,7 @@ impl Buffer {
     pub fn col_from_visual(&self, line: usize, target: usize) -> usize {
         let mut v = 0;
         for (i, c) in self.lines[line].iter().enumerate() {
-            let w = if *c == '\t' { TAB_WIDTH - v % TAB_WIDTH } else { 1 };
+            let w = if *c == '\t' { tab_size() - v % tab_size() } else { 1 };
             if v + w > target {
                 return i;
             }

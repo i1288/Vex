@@ -3,7 +3,7 @@
 
 use regex::{Regex, RegexBuilder};
 
-use crate::buffer::{Buffer, Pos};
+use crate::buffer::{expand_tab, indent_unit, tab_size, Buffer, Pos};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -59,6 +59,9 @@ pub enum Action {
     Edit(String),
     NextTab,
     PrevTab,
+    /// `:set` arguments, applied by the app.
+    Set(String),
+    OpenSettings,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1374,8 +1377,8 @@ impl Vim {
             Key::Char(c) => buf.cursor = buf.insert(cur, &c.to_string()),
             Key::Tab => {
                 let v = buf.visual_col(cur.line, cur.col);
-                let spaces = 4 - v % 4;
-                buf.cursor = buf.insert(cur, &" ".repeat(spaces));
+                let text = if expand_tab() { " ".repeat(tab_size() - v % tab_size()) } else { "\t".into() };
+                buf.cursor = buf.insert(cur, &text);
             }
             Key::Enter => {
                 let mut indent: String = buf.indent_of(cur.line).into_iter().take(cur.col).collect();
@@ -1384,7 +1387,7 @@ impl Vim {
                 let opens = matches!(before, Some('{' | '(' | '[' | ':'));
                 if opens {
                     let closes = matches!((before, after), (Some('{'), Some('}')) | (Some('('), Some(')')) | (Some('['), Some(']')));
-                    let inner = format!("{indent}    ");
+                    let inner = format!("{indent}{}", indent_unit());
                     let end = buf.insert(cur, &format!("\n{inner}"));
                     if closes {
                         buf.insert(end, &format!("\n{indent}"));
@@ -1410,7 +1413,7 @@ impl Vim {
                 if cur.col > 0 {
                     let line = &buf.lines[cur.line];
                     let all_spaces = line[..cur.col].iter().all(|c| *c == ' ');
-                    let n = if all_spaces { (cur.col - 1) % 4 + 1 } else { 1 };
+                    let n = if all_spaces { (cur.col - 1) % tab_size() + 1 } else { 1 };
                     let a = Pos::new(cur.line, cur.col - n);
                     buf.delete(a, cur);
                     buf.cursor = a;
@@ -1535,6 +1538,11 @@ impl Vim {
             },
             "bn" | "bnext" | "tabn" | "tabnext" => return Some(Action::NextTab),
             "bp" | "bprev" | "bprevious" | "tabp" | "tabprev" => return Some(Action::PrevTab),
+            "set" | "se" => return Some(Action::Set(arg.unwrap_or_default())),
+            "colorscheme" | "colo" => {
+                return Some(Action::Set(arg.map_or("theme?".into(), |a| format!("theme={a}"))));
+            }
+            "settings" | "config" | "preferences" => return Some(Action::OpenSettings),
             "noh" | "nohlsearch" => self.highlight_search = false,
             "u" | "undo" => {
                 buf.undo();
@@ -1673,12 +1681,12 @@ fn toggle_case(c: char) -> char {
 fn shift_line(buf: &mut Buffer, line: usize, right: bool) {
     if right {
         if !buf.lines[line].is_empty() {
-            buf.insert(Pos::new(line, 0), "    ");
+            buf.insert(Pos::new(line, 0), &indent_unit());
         }
     } else {
         let n = match buf.lines[line].first() {
             Some('\t') => 1,
-            _ => buf.lines[line].iter().take(4).take_while(|c| **c == ' ').count(),
+            _ => buf.lines[line].iter().take(tab_size()).take_while(|c| **c == ' ').count(),
         };
         if n > 0 {
             buf.delete(Pos::new(line, 0), Pos::new(line, n));
