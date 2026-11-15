@@ -3,7 +3,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{
     self, pos2, vec2, Align2, Color32, CornerRadius, FontId, Frame, Galley, Key as EKey, Margin, Modifiers,
     Painter, Rect, Sense, Shape, Stroke, Ui,
@@ -14,7 +13,8 @@ use crate::explorer::{self, Explorer};
 use crate::settings::{self, Settings};
 use crate::syntax;
 use crate::theme;
-use crate::vim::{self, Action, Key, Mode, Vim};
+use crate::view::View;
+use crate::vim::{Action, Key, Mode, Vim};
 
 const UI_SIZE: f32 = 13.0;
 
@@ -331,6 +331,11 @@ impl VexApp {
                     if modifiers.command && !modifiers.alt && self.shortcut(ctx, key, modifiers.shift) {
                         continue;
                     }
+                    if modifiers.alt && !modifiers.command && key == EKey::Z {
+                        self.settings.word_wrap = !self.settings.word_wrap;
+                        self.follow_cursor = true;
+                        continue;
+                    }
                     if self.quick_open.is_some() {
                         continue;
                     }
@@ -628,239 +633,21 @@ impl VexApp {
 
     fn editor(&mut self, ui: &mut Ui) {
         let rect = ui.available_rect_before_wrap();
-        let resp = ui.allocate_rect(rect, Sense::click_and_drag());
-        let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, theme::p().editor_bg);
         if self.tabs.is_empty() {
+            let painter = ui.painter_at(rect);
+            painter.rect_filled(rect, 0.0, theme::p().editor_bg);
             draw_welcome(&painter, rect);
             return;
         }
-        let ctx = ui.ctx().clone();
-        let st = self.settings.clone();
-        let font = FontId::monospace(st.font_size);
-        let char_w = ctx.fonts_mut(|f| f.glyph_width(&font, 'M'));
-        let line_h = (st.font_size * 1.4).round();
-        let buf = &mut self.tabs[self.active];
-        let vim = &mut self.vim;
-
-        let digits = buf.line_count().to_string().len().max(3);
-        let show_numbers = st.line_numbers || st.relative_line_numbers;
-        let gutter_w = if show_numbers { 18.0 + digits as f32 * char_w + 26.0 } else { 14.0 };
-        let text_rect = Rect::from_min_max(pos2(rect.left() + gutter_w, rect.top()), rect.max);
-        let text_x0 = text_rect.left() + 4.0;
-        vim.page_lines = ((rect.height() / line_h) as usize).max(1);
-
-        // Scroll: wheel, then keep the cursor in view after keyboard input.
-        let max_scroll = (buf.line_count().saturating_sub(1)) as f32 * line_h;
-        if ui.rect_contains_pointer(rect) {
-            let d = ui.input(|i| i.smooth_scroll_delta);
-            buf.scroll_y -= d.y;
-            buf.scroll_x -= d.x;
-        }
-        if self.follow_cursor {
-            self.follow_cursor = false;
-            let so = (st.scroll_off as f32 * line_h).min(rect.height() / 3.0);
-            let cy = buf.cursor.line as f32 * line_h;
-            if cy - so < buf.scroll_y {
-                buf.scroll_y = cy - so;
-            } else if cy + line_h + so > buf.scroll_y + rect.height() {
-                buf.scroll_y = cy + line_h + so - rect.height();
-            }
-            let cx = buf.visual_col(buf.cursor.line, buf.cursor.col) as f32 * char_w;
-            let text_w = text_rect.width() - 20.0;
-            if cx < buf.scroll_x {
-                buf.scroll_x = (cx - text_w / 3.0).max(0.0);
-            } else if cx + char_w * 2.0 > buf.scroll_x + text_w {
-                buf.scroll_x = cx + char_w * 2.0 - text_w + text_w / 3.0;
-            }
-        }
-        buf.scroll_y = buf.scroll_y.clamp(0.0, max_scroll);
-        buf.scroll_x = buf.scroll_x.max(0.0);
-        let (scroll_x, scroll_y) = (buf.scroll_x, buf.scroll_y);
-
-        // Mouse: click places the cursor, drag selects in visual mode.
-        let hit = |buf: &Buffer, p: egui::Pos2| {
-            let l = (((p.y - rect.top() + scroll_y) / line_h).max(0.0) as usize).min(buf.last_line());
-            let v = ((p.x - text_x0 + scroll_x) / char_w).round().max(0.0) as usize;
-            Pos::new(l, buf.col_from_visual(l, v))
+        let view = View {
+            buf: &mut self.tabs[self.active],
+            vim: &mut self.vim,
+            settings: &self.settings,
+            focused: true,
+            follow_cursor: std::mem::take(&mut self.follow_cursor),
+            drag_anchor: &mut self.drag_anchor,
         };
-        if let Some(p) = resp.interact_pointer_pos() {
-            let pos = hit(buf, p);
-            if resp.drag_started() {
-                self.drag_anchor = Some(pos);
-            } else if resp.dragged() {
-                if let Some(a) = self.drag_anchor.filter(|a| *a != pos) {
-                    if !matches!(vim.mode, Mode::Visual | Mode::VisualLine) {
-                        vim.mode = Mode::Visual;
-                        vim.visual_anchor = a;
-                    }
-                    buf.cursor = pos;
-                    buf.clamp_cursor(false);
-                }
-            }
-            if resp.clicked() || resp.drag_started() {
-                if vim.mode != Mode::Insert {
-                    vim.mode = Mode::Normal;
-                }
-                buf.cursor = pos;
-                buf.clamp_cursor(vim.mode == Mode::Insert);
-                buf.want_col = buf.visual_col(pos.line, buf.cursor.col);
-            }
-        }
-        if resp.drag_stopped() {
-            self.drag_anchor = None;
-        }
-
-        let first = (scroll_y / line_h) as usize;
-        let last = ((scroll_y + rect.height()) / line_h).ceil() as usize;
-        let last = last.min(buf.last_line());
-        let y_of = |l: usize| rect.top() + l as f32 * line_h - scroll_y;
-        let x_of = |v: usize| text_x0 + v as f32 * char_w - scroll_x;
-        let text_painter = painter.with_clip_rect(text_rect);
-        let selection = vim.selection(buf);
-        let search = vim.highlight_regex();
-        let lang = syntax::lang_for(&buf.extension());
-
-        // Block-comment state at the first visible line.
-        let mut in_block = false;
-        if let Some(lang) = lang {
-            for l in 0..first.min(buf.line_count()) {
-                syntax::highlight(lang, &buf.lines[l], &mut in_block);
-            }
-        }
-
-        for l in first..=last {
-            let y = y_of(l);
-            let line = &buf.lines[l];
-            let row = Rect::from_min_size(pos2(text_rect.left(), y), vec2(text_rect.width(), line_h));
-
-            if l == buf.cursor.line && selection.is_none() {
-                text_painter.rect_stroke(row.shrink(1.0), 0.0, Stroke::new(2.0, theme::p().current_line), egui::StrokeKind::Inside);
-            }
-            if let Some((a, b)) = selection {
-                if (a.line..=b.line).contains(&l) {
-                    let len = line.len();
-                    let (x0, x1) = if vim.mode == Mode::VisualLine {
-                        (text_rect.left(), text_rect.right())
-                    } else {
-                        let s = if l == a.line { a.col } else { 0 };
-                        let e = if l == b.line { b.col + 1 } else { len + 1 };
-                        let ve = if e > len { buf.visual_col(l, len) + 1 } else { buf.visual_col(l, e) };
-                        (x_of(buf.visual_col(l, s.min(len))), x_of(ve))
-                    };
-                    text_painter.rect_filled(Rect::from_x_y_ranges(x0..=x1, y..=y + line_h), 0.0, theme::p().selection);
-                }
-            }
-            if let Some(re) = &search {
-                for (s, e) in vim::search_matches(line, re) {
-                    let r = Rect::from_x_y_ranges(
-                        x_of(buf.visual_col(l, s))..=x_of(buf.visual_col(l, e)),
-                        y + 1.0..=y + line_h - 1.0,
-                    );
-                    text_painter.rect_filled(r, 2.0, theme::p().search_match);
-                    text_painter.rect_stroke(r, 2.0, Stroke::new(1.0, theme::p().search_border), egui::StrokeKind::Inside);
-                }
-            }
-
-            // Indent guides.
-            let indent = if st.indent_guides { indent_width(buf, l) } else { 0 };
-            for k in 0..indent / tab_size() {
-                let gx = x_of(k * tab_size()).round() + 0.5;
-                text_painter.line_segment([pos2(gx, y), pos2(gx, y + line_h)], Stroke::new(1.0, theme::p().indent_guide));
-            }
-
-            // Text.
-            let mut job = LayoutJob::default();
-            let spans = match lang {
-                Some(lang) => syntax::highlight(lang, line, &mut in_block),
-                None => vec![(0, line.len(), syntax::Tok::Plain)],
-            };
-            let mut v = 0;
-            for (s, e, tok) in spans {
-                let mut text = String::new();
-                for &c in &line[s..e] {
-                    if c == '\t' {
-                        let w = tab_size() - v % tab_size();
-                        text.extend(std::iter::repeat_n(' ', w));
-                        v += w;
-                    } else {
-                        text.push(c);
-                        v += 1;
-                    }
-                }
-                job.append(&text, 0.0, TextFormat::simple(font.clone(), tok.color()));
-            }
-            let g = ctx.fonts_mut(|f| f.layout_job(job));
-            let gy = y + (line_h - g.size().y) / 2.0;
-            text_painter.galley(pos2(text_x0 - scroll_x, gy), g, theme::p().text);
-
-            // Line number: absolute, or distance from the cursor line.
-            if show_numbers {
-                let cur = buf.cursor.line;
-                let (num, color) = if l == cur {
-                    let n = if st.line_numbers { l + 1 } else { 0 };
-                    (n, theme::p().line_number_active)
-                } else if st.relative_line_numbers {
-                    (l.abs_diff(cur), theme::p().line_number)
-                } else {
-                    (l + 1, theme::p().line_number)
-                };
-                painter.text(
-                    pos2(rect.left() + 18.0 + digits as f32 * char_w, y + line_h / 2.0),
-                    Align2::RIGHT_CENTER,
-                    num.to_string(),
-                    font.clone(),
-                    color,
-                );
-            }
-        }
-
-        // Cursor.
-        let c = buf.cursor;
-        if (first..=last).contains(&c.line) {
-            let line = &buf.lines[c.line];
-            let len = line.len();
-            let vx = buf.visual_col(c.line, c.col.min(len));
-            let ch = line.get(c.col).copied();
-            let cells = if ch == Some('\t') { tab_size() - vx % tab_size() } else { 1 };
-            let y = y_of(c.line);
-            let x = x_of(vx);
-            match vim.mode {
-                Mode::Insert => {
-                    text_painter.rect_filled(Rect::from_min_size(pos2(x - 1.0, y), vec2(2.0, line_h)), 0.0, theme::p().cursor);
-                }
-                Mode::Command | Mode::Search => {
-                    let r = Rect::from_min_size(pos2(x, y), vec2(char_w * cells as f32, line_h));
-                    text_painter.rect_stroke(r, 0.0, Stroke::new(1.0, theme::p().cursor), egui::StrokeKind::Inside);
-                }
-                _ => {
-                    let r = Rect::from_min_size(pos2(x, y), vec2(char_w * cells as f32, line_h));
-                    text_painter.rect_filled(r, 0.0, theme::p().cursor);
-                    if let Some(ch) = ch.filter(|c| !c.is_whitespace()) {
-                        text_painter.text(pos2(x, y + line_h / 2.0), Align2::LEFT_CENTER, ch, font.clone(), theme::p().editor_bg);
-                    }
-                }
-            }
-        }
-
-        // Vertical scrollbar with a cursor marker, like VS Code's overview ruler.
-        let total = max_scroll + rect.height();
-        if total > rect.height() + 1.0 {
-            let track = Rect::from_min_max(pos2(rect.right() - 14.0, rect.top()), rect.max);
-            let thumb_h = (rect.height() / total * rect.height()).max(24.0);
-            let range = (rect.height() - thumb_h).max(1.0);
-            let sresp = ui.interact(track, ui.scope_id().with("vscroll"), Sense::click_and_drag());
-            if sresp.dragged() {
-                buf.scroll_y = (buf.scroll_y + sresp.drag_delta().y * max_scroll / range).clamp(0.0, max_scroll);
-            }
-            let ty = rect.top() + buf.scroll_y / max_scroll.max(1.0) * range;
-            let thumb = Rect::from_min_size(pos2(track.left(), ty), vec2(14.0, thumb_h));
-            let alpha = if sresp.dragged() || sresp.hovered() { 0x90 } else { 0x50 };
-            let sb = theme::p().scrollbar;
-            painter.rect_filled(thumb, 0.0, Color32::from_rgba_unmultiplied(sb.r(), sb.g(), sb.b(), alpha));
-            let my = rect.top() + buf.cursor.line as f32 / buf.line_count().max(1) as f32 * rect.height();
-            painter.rect_filled(Rect::from_min_size(pos2(track.left(), my), vec2(14.0, 2.0)), 0.0, theme::p().cursor);
-        }
+        view.show(ui, rect, ui.scope_id().with("editor"));
     }
 
     // ---- overlays ------------------------------------------------------
@@ -1049,22 +836,6 @@ fn overlay_frame(ctx: &egui::Context, id: &str, add: impl FnOnce(&mut Ui)) {
                     add(ui);
                 });
         });
-}
-
-/// Visual width of a line's indentation; blank lines borrow it from neighbors
-/// so indent guides run through them.
-fn indent_width(buf: &Buffer, l: usize) -> usize {
-    let measure = |l: usize| -> Option<usize> {
-        let line = &buf.lines[l];
-        let n = line.iter().take_while(|c| c.is_whitespace()).count();
-        (n < line.len()).then(|| buf.visual_col(l, n))
-    };
-    if let Some(w) = measure(l) {
-        return w;
-    }
-    let prev = (l.saturating_sub(50)..l).rev().find_map(measure).unwrap_or(0);
-    let next = (l + 1..(l + 50).min(buf.line_count())).find_map(measure).unwrap_or(0);
-    prev.min(next)
 }
 
 fn draw_chevron(p: &Painter, c: egui::Pos2, down: bool, color: Color32) {

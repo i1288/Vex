@@ -16,6 +16,7 @@ pub struct Settings {
     pub font_size: f32,
     pub tab_size: usize,
     pub insert_spaces: bool,
+    pub word_wrap: bool,
     pub line_numbers: bool,
     pub relative_line_numbers: bool,
     pub indent_guides: bool,
@@ -29,6 +30,7 @@ impl Default for Settings {
             font_size: 14.0,
             tab_size: 4,
             insert_spaces: true,
+            word_wrap: false,
             line_numbers: true,
             relative_line_numbers: false,
             indent_guides: true,
@@ -52,6 +54,9 @@ tab_size = 4
 
 # Indent with spaces (true) or tab characters (false)
 insert_spaces = true
+
+# Wrap long lines at the window edge (Alt+Z toggles)
+word_wrap = false
 
 line_numbers = true
 relative_line_numbers = false
@@ -167,6 +172,7 @@ impl Settings {
             "number" | "nu" => &mut self.line_numbers,
             "relativenumber" | "rnu" => &mut self.relative_line_numbers,
             "expandtab" | "et" => &mut self.insert_spaces,
+            "wrap" => &mut self.word_wrap,
             "indentguides" | "ig" => &mut self.indent_guides,
             _ => return None,
         })
@@ -175,11 +181,12 @@ impl Settings {
     /// One-line summary for a bare `:set`.
     pub fn summary(&self) -> String {
         format!(
-            "theme={} fontsize={} ts={} {}expandtab {}number {}relativenumber so={}",
+            "theme={} fontsize={} ts={} {}expandtab {}wrap {}number {}relativenumber so={}",
             self.theme,
             self.font_size,
             self.tab_size,
             if self.insert_spaces { "" } else { "no" },
+            if self.word_wrap { "" } else { "no" },
             if self.line_numbers { "" } else { "no" },
             if self.relative_line_numbers { "" } else { "no" },
             self.scroll_off,

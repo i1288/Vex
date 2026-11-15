@@ -59,6 +59,7 @@ The status bar badge shows the current mode: **NORMAL**, **INSERT**, **VISUAL** 
 | `Ctrl+Tab` / `Ctrl+PageDown` | next tab |
 | `Ctrl+=` `Ctrl+-` `Ctrl+0` | zoom editor font |
 | `Ctrl+,` | open settings |
+| `Alt+Z` | toggle word wrap |
 
 Yanks are copied to the system clipboard, and `Ctrl+V` pastes from it.
 
@@ -71,6 +72,7 @@ theme = "dark"              # or "light"
 font_size = 14.0
 tab_size = 4
 insert_spaces = true
+word_wrap = false
 line_numbers = true
 relative_line_numbers = false
 indent_guides = true
@@ -78,14 +80,15 @@ scroll_off = 4
 ```
 
 `:set` changes options for the current session only, like Vim:
-`:set ts=2`, `:set noet`, `:set rnu`, `:set nu!` (toggle), `:set ts?` (show), `:set` (show all), `:colorscheme light`.
+`:set wrap`, `:set ts=2`, `:set noet`, `:set rnu`, `:set nu!` (toggle), `:set ts?` (show), `:set` (show all), `:colorscheme light`.
 
 ## Layout
 
 ```
 src/
   main.rs      entry point, CLI args
-  app.rs       window layout, input routing, drawing
+  app.rs       window layout, input routing, overlays
+  view.rs      editor view: text drawing, soft wrap, mouse
   vim.rs       modal editing engine (GUI-independent, unit tested)
   buffer.rs    text buffer, file I/O, undo/redo
   syntax.rs    keyword-based syntax highlighting

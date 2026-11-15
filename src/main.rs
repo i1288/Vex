@@ -5,6 +5,7 @@ mod settings;
 mod snapshot;
 mod syntax;
 mod theme;
+mod view;
 mod vim;
 
 use std::path::PathBuf;
