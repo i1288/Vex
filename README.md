@@ -65,8 +65,13 @@ The status bar badge shows the current mode: **NORMAL**, **INSERT**, **VISUAL** 
 | `Ctrl+=` `Ctrl+-` `Ctrl+0` | zoom editor font |
 | `Ctrl+,` | open settings |
 | `Alt+Z` | toggle word wrap |
+| ``Ctrl+` `` | show / focus / hide the terminal |
 
-Yanks are copied to the system clipboard, and `Ctrl+V` pastes from it.
+Yanks are copied to the system clipboard, and `Ctrl+V` pastes from it. In the editor, `Ctrl+C` copies the selection in visual mode and acts as `Esc` otherwise.
+
+## Terminal
+
+``Ctrl+` `` opens your `$SHELL` in a panel below the editor, started in the workspace folder. Press it again to hide the panel, or click the editor to switch focus. It's an xterm-compatible terminal with 256-color and true-color support, so full-screen programs like `less`, `htop` and `vim` work. While it has focus, `Ctrl+C` interrupts the running program, `Ctrl+V` pastes, and the mouse wheel scrolls back through history.
 
 ## Settings
 
@@ -95,6 +100,7 @@ src/
   app.rs       window layout, input routing, overlays
   view.rs      editor view: text drawing, soft wrap, mouse
   workspace.rs open buffers, split panes, per-tab cursor and scroll
+  terminal.rs  pty-backed shell and xterm key encoding
   vim.rs       modal editing engine (GUI-independent, unit tested)
   buffer.rs    text buffer, file I/O, undo/redo
   syntax.rs    keyword-based syntax highlighting
@@ -102,6 +108,7 @@ src/
   settings.rs  settings file and :set options
   theme.rs     Dark+ / Light+ palettes and fonts
   snapshot.rs  dev aid: VEX_SNAPSHOT=out.png VEX_KEYS='…' saves a screenshot
+               (on Wayland, run it with WAYLAND_DISPLAY unset)
 ```
 
 Run the tests with `cargo test`.

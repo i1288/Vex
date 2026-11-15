@@ -4,6 +4,7 @@ mod explorer;
 mod settings;
 mod snapshot;
 mod syntax;
+mod terminal;
 mod theme;
 mod view;
 mod vim;

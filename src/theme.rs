@@ -17,6 +17,7 @@ pub struct Palette {
     pub tabs_bg: Color32,
     pub tab_inactive: Color32,
     pub status_bg: Color32,
+    pub panel_bg: Color32,
     pub widget_bg: Color32,
     pub input_bg: Color32,
     pub border: Color32,
@@ -53,6 +54,8 @@ pub struct Palette {
     pub comment: Color32,
     pub constant: Color32,
 
+    /// The 16 ANSI terminal colors.
+    pub ansi: [Color32; 16],
 }
 
 pub const DARK: Palette = Palette {
@@ -63,6 +66,7 @@ pub const DARK: Palette = Palette {
     tabs_bg: hex(0x252526),
     tab_inactive: hex(0x2d2d2d),
     status_bg: hex(0x007acc),
+    panel_bg: hex(0x1e1e1e),
     widget_bg: hex(0x252526),
     input_bg: hex(0x3c3c3c),
     border: hex(0x454545),
@@ -94,6 +98,12 @@ pub const DARK: Palette = Palette {
     number: hex(0xb5cea8),
     comment: hex(0x6a9955),
     constant: hex(0x4fc1ff),
+    ansi: [
+        hex(0x000000), hex(0xcd3131), hex(0x0dbc79), hex(0xe5e510),
+        hex(0x2472c8), hex(0xbc3fbc), hex(0x11a8cd), hex(0xe5e5e5),
+        hex(0x666666), hex(0xf14c4c), hex(0x23d18b), hex(0xf5f543),
+        hex(0x3b8eea), hex(0xd670d6), hex(0x29b8db), hex(0xe5e5e5),
+    ],
 };
 
 pub const LIGHT: Palette = Palette {
@@ -104,6 +114,7 @@ pub const LIGHT: Palette = Palette {
     tabs_bg: hex(0xf3f3f3),
     tab_inactive: hex(0xececec),
     status_bg: hex(0x007acc),
+    panel_bg: hex(0xffffff),
     widget_bg: hex(0xf3f3f3),
     input_bg: hex(0xffffff),
     border: hex(0xc8c8c8),
@@ -135,6 +146,12 @@ pub const LIGHT: Palette = Palette {
     number: hex(0x098658),
     comment: hex(0x008000),
     constant: hex(0x0070c1),
+    ansi: [
+        hex(0x000000), hex(0xcd3131), hex(0x00bc00), hex(0x949800),
+        hex(0x0451a5), hex(0xbc05bc), hex(0x0598bc), hex(0x555555),
+        hex(0x666666), hex(0xcd3131), hex(0x14ce14), hex(0xb5ba00),
+        hex(0x0451a5), hex(0xbc05bc), hex(0x0598bc), hex(0xa5a5a5),
+    ],
 };
 
 static USE_LIGHT: AtomicBool = AtomicBool::new(false);

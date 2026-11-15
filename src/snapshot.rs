@@ -3,10 +3,12 @@
 //! `VEX_SNAPSHOT=out.png VEX_KEYS='jjdd<wait>:w<cr>' vex [path]`
 //!
 //! replays the keys as real input (`<esc> <cr> <bs> <tab> <c-x> <cs-x>`; `<wait>`
-//! lets a few frames pass), saves a PNG of the window and exits.
+//! lets a few frames pass, at least `VEX_SNAPSHOT_DELAY_MS`), saves a PNG of the
+//! window and exits.
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, ColorImage, Event, Key, Modifiers};
 
@@ -15,6 +17,9 @@ pub struct Snapshot {
     groups: Vec<Vec<Event>>,
     frame: u32,
     requested: bool,
+    delay: Duration,
+    last_step: Instant,
+    step: usize,
 }
 
 impl Snapshot {
@@ -22,16 +27,29 @@ impl Snapshot {
         let out = PathBuf::from(std::env::var_os("VEX_SNAPSHOT")?);
         let keys = std::env::var("VEX_KEYS").unwrap_or_default();
         let groups = keys.split("<wait>").map(parse_keys).collect();
-        Some(Self { out, groups, frame: 0, requested: false })
+        let delay = std::env::var("VEX_SNAPSHOT_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        Some(Self {
+            out,
+            groups,
+            frame: 0,
+            requested: false,
+            delay: Duration::from_millis(delay),
+            last_step: Instant::now(),
+            step: 0,
+        })
     }
 
     /// Inject this frame's input; request the screenshot once all keys are in.
     pub fn tick(&mut self, ctx: &egui::Context) {
         self.frame += 1;
         ctx.request_repaint();
-        let step = self.frame.saturating_sub(5);
-        if step > 0 && step % 3 == 0 {
-            let i = (step / 3 - 1) as usize;
+        if self.frame < 5 || self.frame % 3 != 0 || self.last_step.elapsed() < self.delay {
+            return;
+        }
+        self.last_step = Instant::now();
+        self.step += 1;
+        {
+            let i = self.step - 1;
             if let Some(group) = self.groups.get(i) {
                 ctx.input_mut(|inp| inp.events.extend(group.iter().cloned()));
                 return;

@@ -12,6 +12,7 @@ use crate::buffer::{self, tab_size, Buffer, Pos};
 use crate::explorer::{self, Explorer};
 use crate::settings::{self, Settings};
 use crate::syntax;
+use crate::terminal::{self, Terminal};
 use crate::theme;
 use crate::view::View;
 use crate::workspace::Workspace;
@@ -40,6 +41,11 @@ pub struct VexApp {
     title: String,
     allow_close: bool,
     snapshot: Option<crate::snapshot::Snapshot>,
+    terminal: Option<Terminal>,
+    show_terminal: bool,
+    terminal_focused: bool,
+    /// Wheel movement not yet turned into whole scrollback lines.
+    terminal_scroll: f32,
 }
 
 impl VexApp {
@@ -59,6 +65,10 @@ impl VexApp {
             title: String::new(),
             allow_close: false,
             snapshot: crate::snapshot::Snapshot::from_env(),
+            terminal: None,
+            show_terminal: false,
+            terminal_focused: false,
+            terminal_scroll: 0.0,
         };
         app.reload_settings(&cc.egui_ctx);
         if let Some(f) = file {
@@ -164,6 +174,7 @@ impl VexApp {
         }
         self.vim.mode = Mode::Normal;
         self.follow_cursor = true;
+        self.terminal_focused = false;
     }
 
     fn close_tab(&mut self, group: usize, tab: usize, force: bool) -> bool {
@@ -336,6 +347,7 @@ impl VexApp {
                 }
             }
             EKey::P if shift => {
+                self.terminal_focused = false;
                 self.quick_open = None;
                 self.vim.mode = Mode::Command;
                 self.vim.cmdline.clear();
@@ -358,6 +370,7 @@ impl VexApp {
                 let n = key.name().parse::<usize>().unwrap_or(1);
                 self.ws.focus_group(n - 1);
                 self.focus_changed();
+                self.terminal_focused = false;
             }
             EKey::Equals | EKey::Plus => self.settings.font_size = (self.settings.font_size + 1.0).min(48.0),
             EKey::Minus => self.settings.font_size = (self.settings.font_size - 1.0).max(6.0),
@@ -365,15 +378,62 @@ impl VexApp {
                 self.settings.font_size = settings::load().map_or(Settings::default().font_size, |s| s.font_size);
             }
             EKey::Comma => self.open_settings(),
+            EKey::Backtick => self.toggle_terminal(),
             _ => return false,
         }
         ctx.request_repaint();
         true
     }
 
+    /// Keys go to the terminal when its panel is open and focused.
+    fn terminal_has_keys(&self) -> bool {
+        self.show_terminal && self.terminal_focused && self.terminal.is_some() && self.quick_open.is_none()
+    }
+
+    fn toggle_terminal(&mut self) {
+        if !self.show_terminal {
+            self.show_terminal = true;
+            self.terminal_focused = true;
+        } else if self.terminal_focused {
+            self.show_terminal = false;
+            self.terminal_focused = false;
+        } else {
+            self.terminal_focused = true;
+        }
+    }
+
+    /// Route one input event to the terminal. App shortcuts that make sense
+    /// there (panel toggles, quick open, zoom, pane focus) still work.
+    fn terminal_input(&mut self, ctx: &egui::Context, ev: egui::Event) {
+        let Some(t) = &mut self.terminal else { return };
+        match ev {
+            egui::Event::Key { key, pressed: true, modifiers, .. } => {
+                let app_key = matches!(
+                    key,
+                    EKey::Backtick | EKey::P | EKey::B | EKey::Comma | EKey::Equals | EKey::Plus | EKey::Minus
+                        | EKey::Num0 | EKey::Num1 | EKey::Num2 | EKey::Num3 | EKey::Num4 | EKey::Num5
+                );
+                if modifiers.command && app_key {
+                    self.shortcut(ctx, key, modifiers.shift);
+                } else if let Some(bytes) = terminal::encode_key(key, modifiers, t.application_cursor()) {
+                    t.write(&bytes);
+                }
+            }
+            egui::Event::Text(text) => t.write(text.as_bytes()),
+            egui::Event::Paste(text) => t.paste(&text),
+            egui::Event::Copy => t.write(&[0x03]), // Ctrl+C interrupts, as in any terminal
+            egui::Event::Cut => t.write(&[0x18]),
+            _ => {}
+        }
+    }
+
     fn handle_input(&mut self, ctx: &egui::Context) {
         let events = ctx.input(|i| i.events.clone());
         for ev in events {
+            if self.terminal_has_keys() {
+                self.terminal_input(ctx, ev);
+                continue;
+            }
             match ev {
                 egui::Event::Key { key, pressed: true, modifiers, .. } => {
                     if modifiers.command && !modifiers.alt && self.shortcut(ctx, key, modifiers.shift) {
@@ -424,6 +484,11 @@ impl VexApp {
                     for c in t.chars() {
                         self.feed(ctx, Key::Char(c));
                     }
+                }
+                // Ctrl+C: copy the selection in visual mode, otherwise act like Esc (as in vim).
+                egui::Event::Copy if self.quick_open.is_none() => {
+                    let key = if matches!(self.vim.mode, Mode::Visual | Mode::VisualLine) { Key::Char('y') } else { Key::Esc };
+                    self.feed(ctx, key);
                 }
                 egui::Event::Paste(t) if self.quick_open.is_none() => {
                     let buf = match self.ws.current() {
@@ -611,6 +676,7 @@ impl VexApp {
             Some((i, false)) => {
                 self.ws.activate(group, i);
                 self.focus_changed();
+                self.terminal_focused = false;
             }
             None => {}
         }
@@ -647,9 +713,15 @@ impl VexApp {
 
         // Left: mode badge, then message.
         let mode = self.vim.mode;
-        let label = galley(ui.ctx(), mode.label(), 12.0, white);
+        let in_terminal = self.terminal_has_keys();
+        let (label, badge_color) = if in_terminal {
+            ("TERMINAL", Color32::from_rgb(0x3a, 0x3d, 0x41))
+        } else {
+            (mode.label(), theme::mode_color(mode))
+        };
+        let label = galley(ui.ctx(), label, 12.0, white);
         let badge = Rect::from_min_size(rect.min, vec2(label.size().x + 20.0, rect.height()));
-        painter.rect_filled(badge, 0.0, theme::mode_color(mode));
+        painter.rect_filled(badge, 0.0, badge_color);
         painter.galley(badge.center() - label.size() / 2.0, label, white);
         let mut x = badge.right() + 10.0;
         if let Some(name) = self.ws.current_buf().map(|b| b.name()) {
@@ -720,8 +792,10 @@ impl VexApp {
             self.breadcrumbs(ui, crumbs, g);
 
             let follow = g == self.ws.focus && std::mem::take(&mut self.follow_cursor);
+            let editor_focused = !(self.show_terminal && self.terminal_focused);
             let (vim, settings, drag) = (&mut self.vim, &self.settings, &mut self.drag_anchor);
             let resp = self.ws.with_view(g, |buf, focused| {
+                let focused = focused && editor_focused;
                 let view = View { buf, vim, settings, focused, follow_cursor: follow, drag_anchor: drag };
                 view.show(ui, body, ui.scope_id().with(("editor", g)))
             });
@@ -742,10 +816,179 @@ impl VexApp {
                 ui.painter().line_segment([col.left_top(), col.left_bottom()], Stroke::new(1.0, theme::p().border));
             }
         }
-        if let Some(g) = clicked_group.filter(|&g| g != self.ws.focus) {
-            self.ws.focus_group(g);
-            self.focus_changed();
+        if let Some(g) = clicked_group {
+            self.terminal_focused = false;
+            if g != self.ws.focus {
+                self.ws.focus_group(g);
+                self.focus_changed();
+            }
         }
+    }
+
+    // ---- terminal panel --------------------------------------------------
+
+    fn terminal_panel(&mut self, ui: &mut Ui) {
+        let rect = ui.max_rect();
+        // Claim the whole panel; egui sizes panels by what their content uses.
+        ui.expand_to_include_rect(rect);
+        let p = theme::p();
+        let painter = ui.painter_at(rect);
+        painter.line_segment([rect.left_top(), rect.right_top()], Stroke::new(1.0, p.border));
+
+        // Header: the TERMINAL tab plus kill and close buttons, like VS Code's panel.
+        let header = Rect::from_min_size(rect.min, vec2(rect.width(), 35.0));
+        let title = painter.text(
+            pos2(header.left() + 20.0, header.center().y),
+            Align2::LEFT_CENTER,
+            "TERMINAL",
+            FontId::proportional(11.0),
+            p.text_bright,
+        );
+        painter.line_segment(
+            [pos2(title.left(), header.bottom() - 6.0), pos2(title.right(), header.bottom() - 6.0)],
+            Stroke::new(1.0, if self.terminal_focused { p.focus_border } else { p.text_muted }),
+        );
+        if let Some(t) = &self.terminal {
+            painter.text(pos2(title.right() + 16.0, header.center().y), Align2::LEFT_CENTER, &t.name, FontId::proportional(12.0), p.text_muted);
+        }
+        let close = Rect::from_center_size(pos2(header.right() - 22.0, header.center().y), vec2(22.0, 22.0));
+        let kill = Rect::from_center_size(pos2(header.right() - 50.0, header.center().y), vec2(22.0, 22.0));
+        let close_resp = ui.interact(close, ui.scope_id().with("term-close"), Sense::click());
+        let kill_resp = ui.interact(kill, ui.scope_id().with("term-kill"), Sense::click());
+        for (r, resp) in [(close, &close_resp), (kill, &kill_resp)] {
+            if resp.hovered() {
+                painter.rect_filled(r, CornerRadius::same(4), p.list_hover);
+            }
+        }
+        draw_x(&painter, close.center(), 4.5, p.text_ui);
+        draw_trash_icon(&painter, kill.center(), p.text_ui);
+        if close_resp.on_hover_text("Hide Panel (Ctrl+`)").clicked() {
+            self.show_terminal = false;
+            self.terminal_focused = false;
+            return;
+        }
+        if kill_resp.on_hover_text("Kill Terminal").clicked() {
+            self.terminal = None;
+            self.show_terminal = false;
+            self.terminal_focused = false;
+            return;
+        }
+
+        // Screen grid.
+        let body = Rect::from_min_max(pos2(rect.left() + 20.0, header.bottom()), pos2(rect.right() - 14.0, rect.bottom() - 4.0));
+        let font = FontId::monospace(self.settings.font_size);
+        let char_w = ui.ctx().fonts_mut(|f| f.glyph_width(&font, 'M'));
+        let line_h = (self.settings.font_size * 1.3).round();
+        let cols = (body.width() / char_w).max(10.0) as u16;
+        let rows = (body.height() / line_h).max(2.0) as u16;
+
+        if self.terminal.is_none() {
+            let ctx = ui.ctx().clone();
+            match Terminal::spawn_shell(&self.explorer.root, rows, cols, move || ctx.request_repaint()) {
+                Ok(t) => self.terminal = Some(t),
+                Err(e) => {
+                    self.error(e);
+                    self.show_terminal = false;
+                    return;
+                }
+            }
+        }
+        let Some(t) = &mut self.terminal else { return };
+        if t.has_exited() {
+            self.terminal = None;
+            self.show_terminal = false;
+            self.terminal_focused = false;
+            return;
+        }
+        t.resize(rows, cols);
+
+        let area = Rect::from_min_max(pos2(rect.left(), header.bottom()), rect.max);
+        if ui.interact(area, ui.scope_id().with("term-body"), Sense::click()).clicked() {
+            self.terminal_focused = true;
+        }
+        if ui.rect_contains_pointer(area) {
+            self.terminal_scroll += ui.input(|i| i.smooth_scroll_delta.y);
+            let lines = (self.terminal_scroll / line_h) as isize;
+            if lines != 0 {
+                self.terminal_scroll -= lines as f32 * line_h;
+                t.scroll(lines);
+            }
+        }
+
+        let focused = self.terminal_focused;
+        let painter = ui.painter_at(area);
+        t.with_screen(|s| {
+            let (_, ncols) = s.size();
+            let (rows, ncols) = (rows.min(s.size().0.get()), ncols.get());
+            for r in 0..rows {
+                let y = body.top() + r as f32 * line_h;
+                let mut run = String::new();
+                let mut run_start = 0u16;
+                let mut run_fg = p.text;
+                let flush = |run: &mut String, start: u16, fg: Color32| {
+                    if !run.trim_end().is_empty() {
+                        let x = body.left() + start as f32 * char_w;
+                        painter.text(pos2(x, y + line_h / 2.0), Align2::LEFT_CENTER, run.as_str(), font.clone(), fg);
+                    }
+                    run.clear();
+                };
+                let mut c = 0;
+                while c < ncols {
+                    let Some(cell) = s.cell(r, c) else { break };
+                    if cell.is_wide_continuation() {
+                        c += 1;
+                        continue;
+                    }
+                    let mut fg = terminal::color(cell.fgcolor(), true, cell.bold(), p);
+                    let mut bg = terminal::color(cell.bgcolor(), false, false, p);
+                    if cell.inverse() {
+                        std::mem::swap(&mut fg, &mut bg);
+                    }
+                    if cell.dim() {
+                        fg = fg.gamma_multiply(0.6);
+                    }
+                    let w: u16 = if cell.is_wide() { 2 } else { 1 };
+                    if bg != p.panel_bg {
+                        let x = body.left() + c as f32 * char_w;
+                        painter.rect_filled(Rect::from_min_size(pos2(x, y), vec2(char_w * w as f32, line_h)), 0.0, bg);
+                    }
+                    let text = if cell.has_contents() { cell.contents() } else { " " };
+                    // ASCII cells of one color share a text run; anything else is drawn alone
+                    // so wide and fallback-font glyphs stay on the grid.
+                    if fg != run_fg || !text.is_ascii() || w > 1 {
+                        flush(&mut run, run_start, run_fg);
+                        run_start = c;
+                        run_fg = fg;
+                    }
+                    run.push_str(text);
+                    if !text.is_ascii() || w > 1 {
+                        flush(&mut run, run_start, run_fg);
+                        run_start = c + w;
+                    }
+                    if cell.underline() {
+                        let x = body.left() + c as f32 * char_w;
+                        painter.line_segment([pos2(x, y + line_h - 2.0), pos2(x + char_w * w as f32, y + line_h - 2.0)], Stroke::new(1.0, fg));
+                    }
+                    c += w;
+                }
+                flush(&mut run, run_start, run_fg);
+            }
+            if !s.hide_cursor() && s.scrollback() == 0 {
+                let (cr, cc) = s.cursor_position();
+                let cell = Rect::from_min_size(
+                    pos2(body.left() + cc as f32 * char_w, body.top() + cr as f32 * line_h),
+                    vec2(char_w, line_h),
+                );
+                if focused {
+                    painter.rect_filled(cell, 0.0, p.cursor);
+                    if let Some(ch) = s.cell(cr, cc).filter(|c| c.has_contents()) {
+                        painter.text(cell.left_center(), Align2::LEFT_CENTER, ch.contents(), font.clone(), p.panel_bg);
+                    }
+                } else {
+                    painter.rect_stroke(cell, 0.0, Stroke::new(1.0, p.cursor), egui::StrokeKind::Inside);
+                }
+            }
+        });
     }
 
     // ---- overlays ------------------------------------------------------
@@ -890,6 +1133,14 @@ impl eframe::App for VexApp {
                 .frame(Frame::NONE.fill(theme::p().sidebar_bg))
                 .show(ui, |ui| self.sidebar(ui));
         }
+        if self.show_terminal {
+            egui::Panel::bottom("terminal")
+                .resizable(true)
+                .default_size(260.0)
+                .size_range(90.0..=900.0)
+                .frame(Frame::NONE.fill(theme::p().panel_bg))
+                .show(ui, |ui| self.terminal_panel(ui));
+        }
         egui::CentralPanel::no_frame().show(ui, |ui| self.editor_area(ui));
 
         self.quick_open_overlay(&ctx);
@@ -970,6 +1221,14 @@ fn draw_files_icon(p: &Painter, c: egui::Pos2, color: Color32) {
     p.line_segment([back.right_bottom(), pos2(front.right(), back.bottom())], st);
     p.rect_filled(front, 0.0, theme::p().activity_bg);
     p.rect_stroke(front, 1.0, st, egui::StrokeKind::Middle);
+}
+
+fn draw_trash_icon(p: &Painter, c: egui::Pos2, color: Color32) {
+    let st = Stroke::new(1.2, color);
+    p.line_segment([pos2(c.x - 6.0, c.y - 4.0), pos2(c.x + 6.0, c.y - 4.0)], st);
+    p.line_segment([pos2(c.x - 2.0, c.y - 6.0), pos2(c.x + 2.0, c.y - 6.0)], st);
+    let body = vec![pos2(c.x - 4.5, c.y - 4.0), pos2(c.x - 3.5, c.y + 6.0), pos2(c.x + 3.5, c.y + 6.0), pos2(c.x + 4.5, c.y - 4.0)];
+    p.add(Shape::line(body, st));
 }
 
 fn draw_search_icon(p: &Painter, c: egui::Pos2, color: Color32) {
