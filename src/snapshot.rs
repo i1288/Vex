@@ -2,7 +2,8 @@
 //!
 //! `VEX_SNAPSHOT=out.png VEX_KEYS='jjdd<wait>:w<cr>' vex [path]`
 //!
-//! replays the keys as real input (`<esc> <cr> <bs> <tab> <c-x> <cs-x> <click:x,y>`; `<wait>`
+//! replays the keys as real input (`<esc> <cr> <bs> <tab> <c-x> <cs-x> <click:x,y>`,
+//! `<phys:J:n>` for a key at QWERTY position J typing "n"); `<wait>`
 //! lets a few frames pass, at least `VEX_SNAPSHOT_DELAY_MS`), saves a PNG of the
 //! window and exits.
 
@@ -95,6 +96,17 @@ fn parse_keys(s: &str) -> Vec<Event> {
                     "bs" => Some(key_event(Key::Backspace, Modifiers::NONE)),
                     "tab" => Some(key_event(Key::Tab, Modifiers::NONE)),
                     "down" => Some(key_event(Key::ArrowDown, Modifiers::NONE)),
+                    // <phys:J:n>: the key at QWERTY position J, typing "n" (as on Colemak).
+                    n if n.starts_with("phys:") => {
+                        let mut parts = n[5..].splitn(2, ':');
+                        let physical = parts.next().and_then(Key::from_name);
+                        let text = parts.next().unwrap_or("").to_string();
+                        let logical = Key::from_name(&text.to_uppercase()).or(physical);
+                        if let Some(key) = logical {
+                            out.push(Event::Key { key, physical_key: physical, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+                        }
+                        Some(Event::Text(text))
+                    }
                     n if n.starts_with("click:") => {
                         let (x, y) = n[6..].split_once(',').unwrap_or(("0", "0"));
                         let pos = egui::pos2(x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0));

@@ -642,6 +642,14 @@ impl Vim {
         self.process_typeahead(buf, false)
     }
 
+    /// Whether keys are vim commands (Normal and Visual mode) rather than text.
+    /// The character after f, t, F, T or r is text too: it names what to find
+    /// or the replacement.
+    pub fn expects_command_key(&self) -> bool {
+        matches!(self.mode, Mode::Normal | Mode::Visual | Mode::VisualLine)
+            && !matches!(self.pending.last(), Some(Key::Char('f' | 't' | 'F' | 'T' | 'r')))
+    }
+
     /// When held-back keys stop waiting for a mapping and run as typed.
     pub fn typeahead_deadline(&self) -> Option<f64> {
         (!self.typeahead.is_empty()).then_some(self.typeahead_since + MAP_TIMEOUT)
@@ -2179,6 +2187,24 @@ mod tests {
         assert!(v.keymaps.maps.is_empty());
         assert!(v.execute(&mut b, "nunmap <C-s>").is_err());
         assert!(v.execute(&mut b, "\" a comment").unwrap().is_none());
+    }
+
+    #[test]
+    fn command_keys_versus_text() {
+        let (mut b, mut v) = run("abc", "");
+        assert!(v.expects_command_key());
+        feed(&mut b, &mut v, "2f");
+        assert!(!v.expects_command_key(), "the char after f is text");
+        feed(&mut b, &mut v, "c");
+        assert!(v.expects_command_key());
+        feed(&mut b, &mut v, "dt");
+        assert!(!v.expects_command_key());
+        feed(&mut b, &mut v, "<esc>i");
+        assert!(!v.expects_command_key(), "insert mode is text");
+        feed(&mut b, &mut v, "<esc>v");
+        assert!(v.expects_command_key());
+        feed(&mut b, &mut v, "<esc>:");
+        assert!(!v.expects_command_key(), "the command line is text");
     }
 
     #[test]

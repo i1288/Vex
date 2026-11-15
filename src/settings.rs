@@ -37,6 +37,9 @@ pub struct Settings {
     pub render_whitespace: String,
     pub breadcrumbs: bool,
     pub scroll_off: usize,
+    // Keyboard
+    /// Vim commands follow key positions (as on QWERTY), for other keyboard layouts.
+    pub vim_key_positions: bool,
     // Files
     pub auto_save: bool,
     pub auto_save_delay_ms: u64,
@@ -72,6 +75,7 @@ impl Default for Settings {
             render_whitespace: "none".into(),
             breadcrumbs: true,
             scroll_off: 4,
+            vim_key_positions: false,
             auto_save: false,
             auto_save_delay_ms: 1000,
             trim_trailing_whitespace: false,
@@ -198,6 +202,12 @@ impl Settings {
             ("Lines kept visible above and below the cursor", format!("scroll_off = {}", self.scroll_off)),
         ];
         flush(&mut out, &mut lines);
+        out.push_str("\n# ---- Keyboard ----\n");
+        lines = vec![(
+            "Vim commands follow key positions as on a US QWERTY keyboard (for Colemak, Dvorak,\n# AZERTY...). Typing text, : commands and searches still use your layout.",
+            format!("vim_key_positions = {}", b(self.vim_key_positions)),
+        )];
+        flush(&mut out, &mut lines);
         out.push_str("\n# ---- Files ----\n");
         lines = vec![
             ("Save files automatically after you stop typing", format!("auto_save = {}", b(self.auto_save))),
@@ -292,6 +302,7 @@ impl Settings {
             "cursorblink" => &mut self.cursor_blink,
             "breadcrumbs" => &mut self.breadcrumbs,
             "autosave" => &mut self.auto_save,
+            "physicalkeys" | "pk" => &mut self.vim_key_positions,
             _ => return None,
         })
     }
@@ -327,6 +338,7 @@ mod tests {
         s.colors.insert("keyword".into(), "#ff79c6".into());
         s.render_whitespace = "all".into();
         s.ui_scale = 1.25;
+        s.vim_key_positions = true;
         assert_eq!(parse(&s.to_toml()).unwrap(), s);
     }
 

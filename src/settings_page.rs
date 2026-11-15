@@ -178,7 +178,7 @@ impl SettingsPage {
                     Section::Editor => editor(ui, &mut rows, st),
                     Section::Files => files(ui, &mut rows, st),
                     Section::Terminal => terminal(ui, &mut rows, st),
-                    Section::Keyboard => keyboard(ui, &mut rows, &mut out),
+                    Section::Keyboard => keyboard(ui, &mut rows, st, &mut out),
                 };
             }
             if rows.shown == 0 {
@@ -407,7 +407,13 @@ fn terminal(ui: &mut Ui, rows: &mut Rows, st: &mut Settings) -> bool {
     changed
 }
 
-fn keyboard(ui: &mut Ui, rows: &mut Rows, out: &mut Outcome) -> bool {
+fn keyboard(ui: &mut Ui, rows: &mut Rows, st: &mut Settings, out: &mut Outcome) -> bool {
+    let changed = rows.row(
+        ui,
+        "Vim keys by position",
+        "For Colemak, Dvorak, AZERTY and other layouts: vim commands use where a key sits on a US QWERTY keyboard, so h j k l stay together under your fingers. Typing text, : commands, searches and the character after f, t or r still use your layout.",
+        |ui| ui.checkbox(&mut st.vim_key_positions, "Use key positions for vim commands").changed(),
+    );
     rows.row(ui, "Keyboard shortcuts", "Change the keys for app commands, and add Vim mappings without writing a script.", |ui| {
         if ui.button("Open Keyboard Shortcuts").clicked() {
             out.open_keys = true;
@@ -421,7 +427,7 @@ fn keyboard(ui: &mut Ui, rows: &mut Rows, out: &mut Outcome) -> bool {
         }
         false
     });
-    false
+    changed
 }
 
 /// A clickable miniature of an editor drawn in `pal`'s colors.

@@ -88,6 +88,12 @@ On macOS, use Cmd wherever this README says Ctrl, except for ``Ctrl+` `` (termin
 
 Yanks are copied to the system clipboard, and `Ctrl+V` pastes from it. In the editor, `Ctrl+C` copies the selection in visual mode and acts as `Esc` otherwise.
 
+## Other keyboard layouts (Colemak, Dvorak, AZERTY…)
+
+Turn on **Settings → Keyboard → Vim keys by position** (or `vim_key_positions = true`, or `:set physicalkeys`). Vim commands then follow where a key sits on a US QWERTY keyboard, whatever layout you type with. On Colemak, the keys under your right hand stay `h j k l`, and `dd`, `yy`, `:` and the rest are where vim users expect them.
+
+Anything that is text still uses your layout: typing in Insert mode, `:` commands, `/` searches, and the character after `f`, `t`, `F`, `T` and `r` (so `fe` finds a real "e"). Mappings in `init.vex` and the panel are written in QWERTY terms when this is on.
+
 ## Custom shortcuts and mappings
 
 **Keyboard Shortcuts panel.** The gear icon at the bottom of the activity bar (or `Ctrl+K`, or `:keybindings`) opens a panel with two tabs:

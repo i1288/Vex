@@ -197,6 +197,45 @@ pub fn format_keys(keys: &[Key]) -> String {
         .collect()
 }
 
+/// The character a key produces on a US QWERTY keyboard, by its physical
+/// position. Lets vim commands follow key positions on other layouts.
+pub fn qwerty_char(key: eframe::egui::Key, shift: bool) -> Option<char> {
+    use eframe::egui::Key as K;
+    let name = key.name();
+    let mut chars = name.chars();
+    if let (Some(c), None) = (chars.next(), chars.next()) {
+        if c.is_ascii_alphabetic() {
+            return Some(if shift { c.to_ascii_uppercase() } else { c.to_ascii_lowercase() });
+        }
+    }
+    let (plain, shifted) = match key {
+        K::Num1 => ('1', '!'),
+        K::Num2 => ('2', '@'),
+        K::Num3 => ('3', '#'),
+        K::Num4 => ('4', '$'),
+        K::Num5 => ('5', '%'),
+        K::Num6 => ('6', '^'),
+        K::Num7 => ('7', '&'),
+        K::Num8 => ('8', '*'),
+        K::Num9 => ('9', '('),
+        K::Num0 => ('0', ')'),
+        K::Minus => ('-', '_'),
+        K::Equals => ('=', '+'),
+        K::OpenBracket => ('[', '{'),
+        K::CloseBracket => (']', '}'),
+        K::Backslash => ('\\', '|'),
+        K::Semicolon => (';', ':'),
+        K::Quote => ('\'', '"'),
+        K::Comma => (',', '<'),
+        K::Period => ('.', '>'),
+        K::Slash => ('/', '?'),
+        K::Backtick => ('`', '~'),
+        K::Space => (' ', ' '),
+        _ => return None,
+    };
+    Some(if shift { shifted } else { plain })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,6 +250,17 @@ mod tests {
         assert_eq!(parse_keys("<C-S><esc>", &leader), vec![Key::Ctrl('s'), Key::Esc]);
         assert_eq!(parse_keys("a<b", &leader), vec![Key::Char('a'), Key::Char('<'), Key::Char('b')]);
         assert_eq!(parse_keys("<nope>", &leader).len(), 6, "unknown names are literal");
+    }
+
+    #[test]
+    fn qwerty_positions() {
+        use eframe::egui::Key as K;
+        assert_eq!(qwerty_char(K::J, false), Some('j'));
+        assert_eq!(qwerty_char(K::G, true), Some('G'));
+        assert_eq!(qwerty_char(K::Semicolon, true), Some(':'));
+        assert_eq!(qwerty_char(K::Num4, true), Some('$'));
+        assert_eq!(qwerty_char(K::Slash, false), Some('/'));
+        assert_eq!(qwerty_char(K::ArrowUp, false), None);
     }
 
     #[test]

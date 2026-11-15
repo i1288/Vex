@@ -49,6 +49,8 @@ pub struct VexApp {
     applied_font: Option<String>,
     /// When the user last typed; drives auto-save and cursor blink.
     last_input: f64,
+    /// Text events to drop: their key was already used by position (see `vim_key_positions`).
+    skip_text: usize,
     terminal: Option<Terminal>,
     show_terminal: bool,
     terminal_focused: bool,
@@ -84,6 +86,7 @@ impl VexApp {
             snapshot: crate::snapshot::Snapshot::from_env(),
             applied_font: None,
             last_input: 0.0,
+            skip_text: 0,
             terminal: None,
             show_terminal: false,
             terminal_focused: false,
@@ -735,7 +738,7 @@ impl VexApp {
                 continue;
             }
             match ev {
-                egui::Event::Key { key, pressed: true, modifiers, .. } => {
+                egui::Event::Key { key, physical_key, pressed: true, modifiers, .. } => {
                     if let Some(c) = self.keys.lookup(key, modifiers) {
                         self.run_command(ctx, c);
                         continue;
@@ -743,6 +746,19 @@ impl VexApp {
                     if self.quick_open.is_some() {
                         continue;
                     }
+                    // With key positions on, vim commands follow where a key sits on a
+                    // QWERTY keyboard, whatever the layout. The layout's character
+                    // for this press comes next as a Text event, which is dropped.
+                    let positional = self.settings.vim_key_positions;
+                    let plain = !modifiers.ctrl && !modifiers.command && !modifiers.alt;
+                    if positional && plain && self.vim.expects_command_key() {
+                        if let Some(c) = physical_key.and_then(|pk| keymap::qwerty_char(pk, modifiers.shift)) {
+                            self.skip_text += 1;
+                            self.feed(ctx, Key::Char(c));
+                            continue;
+                        }
+                    }
+                    let key = if positional && modifiers.ctrl { physical_key.unwrap_or(key) } else { key };
                     // Vim's Ctrl keys use the real Ctrl key (on macOS, Cmd is for app shortcuts).
                     let k = if modifiers.ctrl {
                         match key {
@@ -778,6 +794,10 @@ impl VexApp {
                     }
                 }
                 egui::Event::Text(t) if self.quick_open.is_none() => {
+                    if self.skip_text > 0 {
+                        self.skip_text -= 1;
+                        continue;
+                    }
                     for c in t.chars() {
                         self.feed(ctx, Key::Char(c));
                     }
@@ -798,6 +818,8 @@ impl VexApp {
                 _ => {}
             }
         }
+        // A key's text arrives in the same frame; never let a stale skip eat later typing.
+        self.skip_text = 0;
     }
 
     fn handle_close_request(&mut self, ctx: &egui::Context) {
