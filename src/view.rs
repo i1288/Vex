@@ -12,9 +12,9 @@ use crate::vim::{self, Mode, Vim};
 
 const SCROLLBAR_W: f32 = 14.0;
 const MINIMAP_W: f32 = 100.0;
-/// Height of one line in the minimap, and width of one character.
+/// Height of one line in the minimap, and the font size of its tiny text.
 const MM_ROW: f32 = 2.0;
-const MM_CHAR: f32 = 1.25;
+const MM_FONT: f32 = 2.2;
 
 /// How a line is cut into display rows.
 pub struct LineLayout {
@@ -446,7 +446,8 @@ fn draw_minimap(
             syntax::highlight(lang, &buf.lines[l], &mut in_block);
         }
     }
-    let max_cols = ((mm.width() - 8.0) / MM_CHAR) as usize;
+    let font = FontId::monospace(MM_FONT);
+    let max_cols = ((mm.width() - 8.0) / ui.ctx().fonts_mut(|f| f.glyph_width(&font, 'M'))) as usize;
     for (i, l) in (first..total.min(first + capacity)).enumerate() {
         let line = &buf.lines[l];
         let y = mm.top() + i as f32 * MM_ROW;
@@ -463,30 +464,35 @@ fn draw_minimap(
             Some(lang) => syntax::highlight(lang, line, &mut in_block),
             None => vec![(0, line.len(), syntax::Tok::Plain)],
         };
-        let vcols = LineLayout::new(buf, l, None).vcols;
+        // Real glyphs in a tiny monospace font: reads as miniature code.
+        let mut job = LayoutJob::default();
+        let mut col = 0;
         for (s, e, tok) in spans {
-            // One stroke per run of non-blank characters, like tiny words.
-            let mut c = s;
-            while c < e {
-                while c < e && line[c].is_whitespace() {
-                    c += 1;
+            let mut text = String::new();
+            for &c in &line[s..e] {
+                if col >= max_cols {
+                    break;
                 }
-                let start = c;
-                while c < e && !line[c].is_whitespace() {
-                    c += 1;
+                let w = if c == '\t' { tab_size() - col % tab_size() } else { 1 };
+                if c == '\t' {
+                    text.extend(std::iter::repeat_n(' ', w));
+                } else {
+                    text.push(c);
                 }
-                if start < c && vcols[start] < max_cols {
-                    let x0 = mm.left() + 6.0 + vcols[start] as f32 * MM_CHAR;
-                    let x1 = mm.left() + 6.0 + vcols[c].min(max_cols) as f32 * MM_CHAR;
-                    mm_painter.rect_filled(Rect::from_x_y_ranges(x0..=x1, y..=y + MM_ROW * 0.8), 0.0, tok.color().gamma_multiply(0.9));
-                }
+                col += w;
             }
+            job.append(&text, 0.0, TextFormat::simple(font.clone(), tok.color().gamma_multiply(0.9)));
         }
+        let g = ui.ctx().fonts_mut(|f| f.layout_job(job));
+        mm_painter.galley(pos2(mm.left() + 6.0, y + MM_ROW / 2.0 - g.size().y / 2.0), g, p.text);
     }
 
-    let alpha = if resp.dragged() { 0.16 } else if resp.hovered() { 0.11 } else { 0.07 };
-    let shade = if p.dark { Color32::WHITE } else { Color32::BLACK };
-    mm_painter.rect_filled(slider, 0.0, shade.gamma_multiply(alpha));
+    // Like VS Code, the slider only shows while the pointer is over the minimap.
+    if resp.hovered() || resp.dragged() {
+        let alpha = if resp.dragged() { 0.16 } else { 0.10 };
+        let shade = if p.dark { Color32::WHITE } else { Color32::BLACK };
+        mm_painter.rect_filled(slider, 0.0, shade.gamma_multiply(alpha));
+    }
 }
 
 /// Visual width of a line's indentation; blank lines borrow it from neighbors
