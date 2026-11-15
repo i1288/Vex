@@ -8,6 +8,7 @@ mod explorer;
 mod keymap;
 mod keys_panel;
 mod settings;
+mod settings_page;
 mod snapshot;
 mod syntax;
 mod terminal;

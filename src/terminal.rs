@@ -29,8 +29,21 @@ fn nz(n: u16) -> NonZeroU16 {
 }
 
 impl Terminal {
-    /// Start the user's shell in `cwd`: `$SHELL` on Unix, PowerShell on Windows.
-    pub fn spawn_shell(cwd: &Path, rows: u16, cols: u16, notify: impl Fn() + Send + 'static) -> Result<Self, String> {
+    /// Start a shell in `cwd`: `shell` if given, else `$SHELL` on Unix and
+    /// PowerShell on Windows.
+    pub fn spawn_shell(
+        cwd: &Path,
+        shell: Option<&str>,
+        rows: u16,
+        cols: u16,
+        notify: impl Fn() + Send + 'static,
+    ) -> Result<Self, String> {
+        if let Some(shell) = shell {
+            let mut parts = shell.split_whitespace();
+            let program = parts.next().unwrap_or(shell);
+            let args: Vec<&str> = parts.collect();
+            return Self::spawn(program, &args, cwd, rows, cols, notify);
+        }
         if cfg!(windows) {
             return Self::spawn("powershell.exe", &["-NoLogo"], cwd, rows, cols, notify);
         }

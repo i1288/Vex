@@ -14,6 +14,7 @@ use crate::explorer::{self, Explorer};
 use crate::keymap::{self, MapMode, Mapping, Origin};
 use crate::keys_panel::KeysPanel;
 use crate::settings::{self, Settings};
+use crate::settings_page::SettingsPage;
 use crate::syntax;
 use crate::terminal::{self, Terminal};
 use crate::theme;
@@ -44,6 +45,10 @@ pub struct VexApp {
     title: String,
     allow_close: bool,
     snapshot: Option<crate::snapshot::Snapshot>,
+    /// The editor font currently installed, to reload fonts only when it changes.
+    applied_font: Option<String>,
+    /// When the user last typed; drives auto-save and cursor blink.
+    last_input: f64,
     terminal: Option<Terminal>,
     show_terminal: bool,
     terminal_focused: bool,
@@ -52,6 +57,9 @@ pub struct VexApp {
     logo: egui::TextureHandle,
     keys: Keybindings,
     keys_panel: Option<KeysPanel>,
+    settings_page: Option<SettingsPage>,
+    /// Settings changed in the page and not yet written to disk, and when.
+    settings_dirty_at: Option<f64>,
 }
 
 impl VexApp {
@@ -74,6 +82,8 @@ impl VexApp {
             title: String::new(),
             allow_close: false,
             snapshot: crate::snapshot::Snapshot::from_env(),
+            applied_font: None,
+            last_input: 0.0,
             terminal: None,
             show_terminal: false,
             terminal_focused: false,
@@ -81,6 +91,8 @@ impl VexApp {
             logo,
             keys: Keybindings::default(),
             keys_panel: None,
+            settings_page: None,
+            settings_dirty_at: None,
         };
         app.reload_settings(&cc.egui_ctx);
         app.load_keybindings();
@@ -93,6 +105,11 @@ impl VexApp {
 
     /// Re-read the settings file and apply it.
     fn reload_settings(&mut self, ctx: &egui::Context) -> bool {
+        if let Some(dir) = settings::themes_dir() {
+            if let Some(e) = theme::load_theme_files(&dir).into_iter().next() {
+                self.error(e);
+            }
+        }
         match settings::load() {
             Ok(s) => {
                 self.settings = s;
@@ -107,8 +124,18 @@ impl VexApp {
     }
 
     fn apply_settings(&mut self, ctx: &egui::Context) {
-        self.settings.apply_globals();
+        if let Some(w) = self.settings.apply_globals().into_iter().next() {
+            self.error(w);
+        }
         theme::apply_visuals(ctx);
+        ctx.set_zoom_factor(self.settings.ui_scale);
+        if self.applied_font.as_deref() != Some(self.settings.font_family.as_str()) {
+            let path = (!self.settings.font_family.is_empty()).then(|| PathBuf::from(&self.settings.font_family));
+            if let Err(e) = theme::install_fonts(ctx, path.as_deref()) {
+                self.error(e);
+            }
+            self.applied_font = Some(self.settings.font_family.clone());
+        }
         self.follow_cursor = true;
     }
 
@@ -129,6 +156,67 @@ impl VexApp {
             }
         }
         self.apply_settings(ctx);
+    }
+
+    fn open_settings_page(&mut self) {
+        self.quick_open = None;
+        self.terminal_focused = false;
+        if matches!(self.vim.mode, Mode::Command | Mode::Search) {
+            self.vim.mode = Mode::Normal;
+        }
+        self.settings_page.get_or_insert_with(SettingsPage::default);
+    }
+
+    fn settings_page_ui(&mut self, ui: &mut Ui) {
+        let rect = ui.available_rect_before_wrap();
+        let Some(page) = &mut self.settings_page else { return };
+        let out = page.show(ui, rect, &mut self.settings);
+        let ctx = ui.ctx().clone();
+        if out.reload_themes {
+            if let Some(dir) = settings::themes_dir() {
+                if let Some(e) = theme::load_theme_files(&dir).into_iter().next() {
+                    self.error(e);
+                }
+            }
+            self.apply_settings(&ctx);
+        }
+        if out.changed {
+            self.apply_settings(&ctx);
+            self.settings_dirty_at = Some(ctx.input(|i| i.time));
+        }
+        if out.close {
+            self.settings_page = None;
+        }
+        if out.open_keys {
+            self.open_keys_panel();
+        }
+        if out.open_init_script {
+            self.open_init_script();
+        }
+        if let Some(path) = out.open_file {
+            self.save_settings_now();
+            self.open(&path);
+        }
+    }
+
+    /// Write settings changed in the page once they've been still for a moment
+    /// (dragging a slider changes them every frame).
+    fn save_settings_if_idle(&mut self, ctx: &egui::Context) {
+        let Some(t) = self.settings_dirty_at else { return };
+        let idle = ctx.input(|i| i.time) - t;
+        if idle >= 0.4 || self.settings_page.is_none() {
+            self.save_settings_now();
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(0.4 - idle));
+        }
+    }
+
+    fn save_settings_now(&mut self) {
+        if self.settings_dirty_at.take().is_some() {
+            if let Err(e) = self.settings.save() {
+                self.error(format!("Cannot save settings: {e}"));
+            }
+        }
     }
 
     fn open_init_script(&mut self) {
@@ -282,7 +370,7 @@ impl VexApp {
             Command::ZoomReset => {
                 self.settings.font_size = settings::load().map_or(Settings::default().font_size, |s| s.font_size);
             }
-            Command::OpenSettings => self.open_settings(),
+            Command::OpenSettings => self.open_settings_page(),
             Command::Keybindings => self.open_keys_panel(),
             Command::FocusPane(n) => {
                 self.ws.focus_group(n as usize - 1);
@@ -382,6 +470,9 @@ impl VexApp {
         if let Some(p) = path {
             buf.path = Some(p);
         }
+        if self.settings.trim_trailing_whitespace && buf.trim_trailing_whitespace() {
+            buf.clamp_cursor(self.vim.mode == Mode::Insert);
+        }
         match buf.save() {
             Ok(bytes) => {
                 let msg = format!("\"{}\" {}L, {}B written", buf.name(), buf.line_count(), bytes);
@@ -469,7 +560,7 @@ impl VexApp {
                 self.focus_changed();
             }
             Action::Set(args) => self.set_options(ctx, &args),
-            Action::OpenSettings => self.open_settings(),
+            Action::OpenSettings => self.open_settings_page(),
             Action::Split(p) => {
                 self.ws.split();
                 self.focus_changed();
@@ -487,6 +578,7 @@ impl VexApp {
                     "terminal" => Command::ToggleTerminal,
                     "files" => Command::QuickOpen,
                     "sidebar" => Command::ToggleSidebar,
+                    "settingsfile" => return self.open_settings(),
                     _ => Command::Keybindings,
                 };
                 self.run_command(ctx, c);
@@ -514,6 +606,7 @@ impl VexApp {
     // ---- input ---------------------------------------------------------
 
     fn feed(&mut self, ctx: &egui::Context, key: Key) {
+        self.last_input = ctx.input(|i| i.time);
         let buf = match self.ws.current() {
             Some(b) => &mut self.ws.buffers[b],
             None => &mut self.scratch,
@@ -531,6 +624,47 @@ impl VexApp {
         for a in actions {
             self.handle_action(ctx, a);
         }
+    }
+
+    /// Whether a blinking cursor is in its visible half. It stays solid while
+    /// typing and starts blinking after a short pause.
+    fn cursor_blink_on(&self, ctx: &egui::Context) -> bool {
+        if !self.settings.cursor_blink {
+            return true;
+        }
+        let idle = ctx.input(|i| i.time) - self.last_input;
+        if idle < 0.5 {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(0.5 - idle));
+            return true;
+        }
+        let phase = (idle - 0.5) % 1.0;
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(0.5 - phase % 0.5 + 0.01));
+        phase >= 0.5
+    }
+
+    /// Save files that have a name once typing pauses, if auto-save is on.
+    fn auto_save(&mut self, ctx: &egui::Context) {
+        if !self.settings.auto_save {
+            return;
+        }
+        let pending: Vec<usize> = (0..self.ws.buffers.len())
+            .filter(|&b| self.ws.buffers[b].dirty && self.ws.buffers[b].path.is_some())
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        let delay = self.settings.auto_save_delay_ms as f64 / 1000.0;
+        let idle = ctx.input(|i| i.time) - self.last_input;
+        if idle < delay {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(delay - idle));
+            return;
+        }
+        let message = self.vim.message.clone();
+        for b in pending {
+            self.save(Some(b), None);
+        }
+        // Auto-save is quiet: keep whatever the status bar said before.
+        self.vim.message = message;
     }
 
     /// Keys held for a possible mapping run as typed once the timeout passes.
@@ -588,8 +722,8 @@ impl VexApp {
     }
 
     fn handle_input(&mut self, ctx: &egui::Context) {
-        if self.keys_panel.is_some() {
-            return; // the panel reads its own input
+        if self.keys_panel.is_some() || self.settings_page.is_some() {
+            return; // the panel and page read their own input
         }
         let events = ctx.input(|i| i.events.clone());
         for ev in events {
@@ -721,12 +855,16 @@ impl VexApp {
         // Bottom: the gear, like VS Code's Manage button.
         let r = Rect::from_min_size(pos2(rect.left(), rect.bottom() - 48.0), vec2(48.0, 48.0));
         let resp = ui.interact(r, ui.scope_id().with("act-keys"), Sense::click());
-        let color = if self.keys_panel.is_some() || resp.hovered() { theme::p().activity_fg } else { theme::p().icon_inactive };
+        let color = if self.settings_page.is_some() || resp.hovered() { theme::p().activity_fg } else { theme::p().icon_inactive };
         draw_gear_icon(ui.painter(), r.center(), color);
         if resp.clicked() {
-            self.open_keys_panel();
+            if self.settings_page.is_some() {
+                self.settings_page = None;
+            } else {
+                self.open_settings_page();
+            }
         }
-        resp.on_hover_text(format!("Keyboard Shortcuts ({})", self.keys.label(Command::Keybindings)));
+        resp.on_hover_text(format!("Settings ({})", self.keys.label(Command::OpenSettings)));
     }
 
     fn sidebar(&mut self, ui: &mut Ui) {
@@ -1004,7 +1142,8 @@ impl VexApp {
         for g in 0..n {
             let col = Rect::from_min_size(pos2(area.left() + g as f32 * w, area.top()), vec2(w, area.height()));
             let tabs = Rect::from_min_size(col.min, vec2(w, 35.0));
-            let crumbs = Rect::from_min_size(pos2(col.left(), tabs.bottom()), vec2(w, 22.0));
+            let crumbs_h = if self.settings.breadcrumbs { 22.0 } else { 0.0 };
+            let crumbs = Rect::from_min_size(pos2(col.left(), tabs.bottom()), vec2(w, crumbs_h));
             let body = Rect::from_min_max(pos2(col.left(), crumbs.bottom()), col.max);
             if g >= self.ws.groups.len() {
                 break; // a tab close removed this group mid-frame
@@ -1013,14 +1152,17 @@ impl VexApp {
             if g >= self.ws.groups.len() {
                 break;
             }
-            self.breadcrumbs(ui, crumbs, g);
+            if self.settings.breadcrumbs {
+                self.breadcrumbs(ui, crumbs, g);
+            }
 
             let follow = g == self.ws.focus && std::mem::take(&mut self.follow_cursor);
+            let cursor_visible = self.cursor_blink_on(ui.ctx());
             let editor_focused = !(self.show_terminal && self.terminal_focused);
             let (vim, settings, drag) = (&mut self.vim, &self.settings, &mut self.drag_anchor);
             let resp = self.ws.with_view(g, |buf, focused| {
                 let focused = focused && editor_focused;
-                let view = View { buf, vim, settings, focused, follow_cursor: follow, drag_anchor: drag };
+                let view = View { buf, vim, settings, focused, follow_cursor: follow, drag_anchor: drag, cursor_visible };
                 view.show(ui, body, ui.scope_id().with(("editor", g)))
             });
             match resp {
@@ -1100,15 +1242,17 @@ impl VexApp {
 
         // Screen grid.
         let body = Rect::from_min_max(pos2(rect.left() + 20.0, header.bottom()), pos2(rect.right() - 14.0, rect.bottom() - 4.0));
-        let font = FontId::monospace(self.settings.font_size);
+        let size = if self.settings.terminal_font_size > 0.0 { self.settings.terminal_font_size } else { self.settings.font_size };
+        let font = FontId::monospace(size);
         let char_w = ui.ctx().fonts_mut(|f| f.glyph_width(&font, 'M'));
-        let line_h = (self.settings.font_size * 1.3).round();
+        let line_h = (size * 1.3).round();
         let cols = (body.width() / char_w).max(10.0) as u16;
         let rows = (body.height() / line_h).max(2.0) as u16;
 
         if self.terminal.is_none() {
             let ctx = ui.ctx().clone();
-            match Terminal::spawn_shell(&self.explorer.root, rows, cols, move || ctx.request_repaint()) {
+            let shell = Some(self.settings.terminal_shell.trim()).filter(|s| !s.is_empty());
+            match Terminal::spawn_shell(&self.explorer.root, shell, rows, cols, move || ctx.request_repaint()) {
                 Ok(t) => self.terminal = Some(t),
                 Err(e) => {
                     self.error(e);
@@ -1163,8 +1307,8 @@ impl VexApp {
                         c += 1;
                         continue;
                     }
-                    let mut fg = terminal::color(cell.fgcolor(), true, cell.bold(), p);
-                    let mut bg = terminal::color(cell.bgcolor(), false, false, p);
+                    let mut fg = terminal::color(cell.fgcolor(), true, cell.bold(), &p);
+                    let mut bg = terminal::color(cell.bgcolor(), false, false, &p);
                     if cell.inverse() {
                         std::mem::swap(&mut fg, &mut bg);
                     }
@@ -1343,6 +1487,7 @@ impl eframe::App for VexApp {
         }
         self.handle_input(&ctx);
         self.check_mapping_timeout(&ctx);
+        self.auto_save(&ctx);
         self.handle_close_request(&ctx);
         self.update_title(&ctx);
 
@@ -1372,7 +1517,14 @@ impl eframe::App for VexApp {
                 .frame(Frame::NONE.fill(theme::p().panel_bg))
                 .show(ui, |ui| self.terminal_panel(ui));
         }
-        egui::CentralPanel::no_frame().show(ui, |ui| self.editor_area(ui));
+        egui::CentralPanel::no_frame().show(ui, |ui| {
+            if self.settings_page.is_some() {
+                self.settings_page_ui(ui);
+            } else {
+                self.editor_area(ui);
+            }
+        });
+        self.save_settings_if_idle(&ctx);
 
         self.quick_open_overlay(&ctx);
         self.cmdline_overlay(&ctx);
@@ -1392,7 +1544,7 @@ impl eframe::App for VexApp {
         }
 
         // Keep egui widgets from holding keyboard focus; keys belong to the editor.
-        if self.quick_open.is_none() && self.keys_panel.is_none() {
+        if self.quick_open.is_none() && self.keys_panel.is_none() && self.settings_page.is_none() {
             if let Some(id) = ctx.memory(|m| m.focused()) {
                 ctx.memory_mut(|m| m.surrender_focus(id));
             }

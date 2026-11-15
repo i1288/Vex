@@ -315,6 +315,20 @@ impl Buffer {
             .join("\n")
     }
 
+    /// Remove spaces and tabs at line ends (as one undoable change); returns
+    /// whether anything changed.
+    pub fn trim_trailing_whitespace(&mut self) -> bool {
+        if !self.lines.iter().any(|l| l.last().is_some_and(|c| c.is_whitespace())) {
+            return false;
+        }
+        self.checkpoint();
+        for line in &mut self.lines {
+            let keep = line.iter().rposition(|c| !c.is_whitespace()).map_or(0, |i| i + 1);
+            line.truncate(keep);
+        }
+        true
+    }
+
     // ---- undo ----------------------------------------------------------
 
     /// Record the current state as an undo point; call before each change.
@@ -384,6 +398,14 @@ mod tests {
         b.save().unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\r\nbc\r\n");
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn trims_trailing_whitespace() {
+        let mut b = Buffer::from_str("a  \n\t\nb");
+        assert!(b.trim_trailing_whitespace());
+        assert_eq!(b.text(), "a\n\nb");
+        assert!(!b.trim_trailing_whitespace());
     }
 
     #[test]

@@ -1650,6 +1650,7 @@ impl Vim {
             "files" | "find" => return Some(Action::App("files")),
             "sidebar" | "explorer" | "Explore" | "Lex" => return Some(Action::App("sidebar")),
             "keybindings" | "keys" | "shortcuts" => return Some(Action::App("keybindings")),
+            "settingsfile" => return Some(Action::App("settingsfile")),
             "w" | "w!" | "write" => return Some(Action::Write(arg)),
             "wa" | "wall" => return Some(Action::WriteAll),
             "q" | "quit" | "bd" | "close" => return Some(Action::Quit { force: false }),

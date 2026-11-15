@@ -72,7 +72,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     info(Command::ZoomIn, "zoom_in", "Zoom In", &["Cmd+=", "Cmd++"], true),
     info(Command::ZoomOut, "zoom_out", "Zoom Out", &["Cmd+-"], true),
     info(Command::ZoomReset, "zoom_reset", "Reset Zoom", &["Cmd+0"], true),
-    info(Command::OpenSettings, "open_settings", "Open Settings File", &["Cmd+,"], true),
+    info(Command::OpenSettings, "open_settings", "Settings", &["Cmd+,"], true),
     info(Command::Keybindings, "keyboard_shortcuts", "Keyboard Shortcuts", &["Cmd+K"], true),
     info(Command::FocusPane(1), "focus_pane_1", "Focus Pane 1", &["Cmd+1"], true),
     info(Command::FocusPane(2), "focus_pane_2", "Focus Pane 2", &["Cmd+2"], true),

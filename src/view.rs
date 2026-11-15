@@ -105,11 +105,13 @@ pub struct View<'a> {
     /// Scroll so the cursor is visible.
     pub follow_cursor: bool,
     pub drag_anchor: &'a mut Option<Pos>,
+    /// False during the "off" half of a cursor blink.
+    pub cursor_visible: bool,
 }
 
 impl View<'_> {
     pub fn show(self, ui: &mut Ui, rect: Rect, id: egui::Id) -> Response {
-        let View { buf, vim, settings: st, focused, follow_cursor, drag_anchor } = self;
+        let View { buf, vim, settings: st, focused, follow_cursor, drag_anchor, cursor_visible } = self;
         let resp = ui.interact(rect, id, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         let p = theme::p();
@@ -118,7 +120,7 @@ impl View<'_> {
         let ctx = ui.ctx().clone();
         let font = FontId::monospace(st.font_size);
         let char_w = ctx.fonts_mut(|f| f.glyph_width(&font, 'M'));
-        let line_h = (st.font_size * 1.4).round();
+        let line_h = (st.font_size * st.line_height).round();
         let mode = if focused { vim.mode } else { Mode::Normal };
 
         let digits = buf.line_count().to_string().len().max(3);
@@ -246,7 +248,7 @@ impl View<'_> {
             let matches = search.as_ref().map(|re| vim::search_matches(line, re)).unwrap_or_default();
             let y0 = row_y(row_of_line[l]);
 
-            if l == cur_line_number && selection.is_none() {
+            if l == cur_line_number && selection.is_none() && st.highlight_current_line {
                 let block = Rect::from_min_size(pos2(text_rect.left(), y0), vec2(text_rect.width(), line_h * lay.rows() as f32));
                 text_painter.rect_stroke(block.shrink(1.0), 0.0, Stroke::new(2.0, p.current_line), egui::StrokeKind::Inside);
             }
@@ -303,6 +305,29 @@ impl View<'_> {
                 let g = ctx.fonts_mut(|f| f.layout_job(job));
                 let gy = y + (line_h - g.size().y) / 2.0;
                 text_painter.galley(pos2(x_of(s), gy), g, p.text);
+
+                // Visible whitespace: a dot per space, an arrow per tab.
+                if st.render_whitespace != "none" {
+                    let first_text = line.iter().position(|c| !c.is_whitespace()).unwrap_or(len);
+                    let last_text = line.iter().rposition(|c| !c.is_whitespace()).map_or(0, |i| i + 1);
+                    let ws_color = p.indent_guide.gamma_multiply(1.6);
+                    for c in s..e {
+                        let boundary = c < first_text || c >= last_text;
+                        if !line[c].is_whitespace() || (st.render_whitespace == "boundary" && !boundary) {
+                            continue;
+                        }
+                        let (x0, x1) = (x_of(c), x_of(c + 1));
+                        let cy = y + line_h / 2.0;
+                        if line[c] == '\t' {
+                            let st = Stroke::new(1.0, ws_color);
+                            text_painter.line_segment([pos2(x0 + 2.0, cy), pos2(x1 - 2.0, cy)], st);
+                            text_painter.line_segment([pos2(x1 - 5.0, cy - 3.0), pos2(x1 - 2.0, cy)], st);
+                            text_painter.line_segment([pos2(x1 - 5.0, cy + 3.0), pos2(x1 - 2.0, cy)], st);
+                        } else {
+                            text_painter.circle_filled(pos2((x0 + x1) / 2.0, cy), 1.2, ws_color);
+                        }
+                    }
+                }
                 if r > 0 {
                     // Wrap marker in the gutter, like a soft line continuation.
                     painter.text(
@@ -345,6 +370,7 @@ impl View<'_> {
             let x = text_x0 + cur_layout.x_col(cur_row_in_line, c.col) as f32 * char_w - scroll_x;
             let cell = Rect::from_min_size(pos2(x, y), vec2(char_w * cells as f32, line_h));
             match mode {
+                _ if !cursor_visible => {}
                 _ if !focused => {
                     text_painter.rect_stroke(cell, 0.0, Stroke::new(1.0, p.cursor.gamma_multiply(0.6)), egui::StrokeKind::Inside);
                 }
@@ -354,12 +380,20 @@ impl View<'_> {
                 Mode::Command | Mode::Search => {
                     text_painter.rect_stroke(cell, 0.0, Stroke::new(1.0, p.cursor), egui::StrokeKind::Inside);
                 }
-                _ => {
-                    text_painter.rect_filled(cell, 0.0, p.cursor);
-                    if let Some(ch) = ch.filter(|c| !c.is_whitespace()) {
-                        text_painter.text(pos2(x, y + line_h / 2.0), Align2::LEFT_CENTER, ch, font.clone(), p.editor_bg);
+                _ => match st.cursor_style.as_str() {
+                    "line" => {
+                        text_painter.rect_filled(Rect::from_min_size(pos2(x - 1.0, y), vec2(2.0, line_h)), 0.0, p.cursor);
                     }
-                }
+                    "underline" => {
+                        text_painter.rect_filled(Rect::from_min_size(pos2(x, y + line_h - 3.0), vec2(cell.width(), 2.0)), 0.0, p.cursor);
+                    }
+                    _ => {
+                        text_painter.rect_filled(cell, 0.0, p.cursor);
+                        if let Some(ch) = ch.filter(|c| !c.is_whitespace()) {
+                            text_painter.text(pos2(x, y + line_h / 2.0), Align2::LEFT_CENTER, ch, font.clone(), p.editor_bg);
+                        }
+                    }
+                },
             }
         }
 

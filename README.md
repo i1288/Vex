@@ -64,7 +64,7 @@ The status bar badge shows the current mode: **NORMAL**, **INSERT**, **VISUAL** 
 | `:s/a/b/g` `:%s/a/b/gi` | replace (regex; `$1`/`\1` groups, `\n` splits lines) |
 | `:noh` | clear search highlight |
 | `:bn` `:bp` | next / previous tab |
-| `:set …` `:settings` | change options / open settings file |
+| `:set …` `:settings` | change options / open the Settings page |
 | `:nnoremap` `:inoremap` … `:source` | mappings and scripts (see below) |
 | `:terminal` `:files` `:sidebar` `:keybindings` | app commands |
 | `:vsp [file]` `:only` | split pane (side by side) / close other panes |
@@ -81,7 +81,7 @@ On macOS, use Cmd wherever this README says Ctrl, except for ``Ctrl+` `` (termin
 | `Ctrl+1` … `Ctrl+5` | focus pane N |
 | `Ctrl+Tab` / `Ctrl+PageDown` | next tab |
 | `Ctrl+=` `Ctrl+-` `Ctrl+0` | zoom editor font |
-| `Ctrl+,` | open settings |
+| `Ctrl+,` | open the Settings page |
 | `Ctrl+K` | keyboard shortcuts panel |
 | `Alt+Z` | toggle word wrap |
 | ``Ctrl+` `` | show / focus / hide the terminal |
@@ -120,23 +120,35 @@ Commands useful in mappings: `:terminal`, `:files` (Go to File), `:sidebar`, `:k
 
 ## Settings
 
-`:settings` (or `Ctrl+,`) opens `~/.config/vex/settings.toml`. Saving it applies the changes right away:
+The **Settings page** (gear icon at the bottom left, `Ctrl+,`, or `:settings`) has every option, with a search box and these sections:
+
+- **Appearance:** interface size, editor font (any monospace font on your computer), font size, line height, cursor style and blinking
+- **Theme & Colors:** pick a theme from preview cards, change any single color with a color picker, or save the result as a new theme
+- **Editor:** tab size, spaces or tabs, word wrap, minimap, line numbers (absolute or relative), indent guides, current-line highlight, visible whitespace, breadcrumbs, scroll margin
+- **Files:** auto-save (with a delay), trim trailing whitespace on save
+- **Terminal:** font size and which shell to run
+- **Keyboard:** links to the Keyboard Shortcuts panel and to `init.vex`
+
+Changes apply immediately and are saved to `~/.config/vex/settings.toml`, a commented file you can also edit directly (`:settingsfile`). `:set` changes options for the current session only, like Vim: `:set wrap`, `:set nominimap`, `:set ts=2`, `:set noet`, `:set rnu`, `:set list` (show whitespace), `:set nu!` (toggle), `:set ts?` (show), `:set` (show all), `:colorscheme dracula`.
+
+### Themes
+
+Built in: **Dark Modern** and **Light Modern** (the defaults), **Dark+** and **Light+** (classic), **Monokai**, **Dracula**, **One Dark**, **Nord**, **Gruvbox Dark**, **Tokyo Night**, **Catppuccin Mocha**, **Solarized Dark**, **Solarized Light** and **GitHub Light**.
+
+Your own themes are `.toml` files in `~/.config/vex/themes/`. Each one starts from a built-in theme and changes whichever colors you list; the Settings page shows every color name. The **Save theme** button in Settings writes one for you from the current colors.
 
 ```toml
-theme = "dark"              # "light", or the classic "dark-plus" / "light-plus"
-font_size = 14.0
-tab_size = 4
-insert_spaces = true
-word_wrap = false
-minimap = true
-line_numbers = true
-relative_line_numbers = false
-indent_guides = true
-scroll_off = 4
+# ~/.config/vex/themes/midnight.toml
+title = "Midnight"
+base = "tokyo-night"
+
+[colors]
+editor_bg = "#0b0c14"
+keyword = "#ff6ac1"
+accent = "#ff6ac1"
 ```
 
-`:set` changes options for the current session only, like Vim:
-`:set wrap`, `:set nominimap`, `:set ts=2`, `:set noet`, `:set rnu`, `:set nu!` (toggle), `:set ts?` (show), `:set` (show all), `:colorscheme light`.
+To tweak a theme without making a new one, add colors under `[colors]` in `settings.toml`, or use **Customize colors** in the Settings page.
 
 ## Layout
 
@@ -152,10 +164,11 @@ src/
   syntax.rs    keyword-based syntax highlighting
   explorer.rs  file tree and fuzzy file finder
   settings.rs  settings file and :set options
+  settings_page.rs  the Settings page
   keymap.rs    vim key notation and mapping table
   commands.rs  app commands and configurable shortcuts
   keys_panel.rs  the Keyboard Shortcuts panel
-  theme.rs     Dark+ / Light+ palettes and fonts
+  theme.rs     built-in themes, theme files, color overrides, fonts
   snapshot.rs  dev aid: VEX_SNAPSHOT=out.png VEX_KEYS='…' saves a screenshot
                (on Wayland, run it with WAYLAND_DISPLAY unset)
 ```
