@@ -14,6 +14,7 @@ use crate::settings::{self, Settings};
 use crate::syntax;
 use crate::theme;
 use crate::view::View;
+use crate::workspace::Workspace;
 use crate::vim::{Action, Key, Mode, Vim};
 
 const UI_SIZE: f32 = 13.0;
@@ -25,8 +26,7 @@ struct QuickOpen {
 }
 
 pub struct VexApp {
-    tabs: Vec<Buffer>,
-    active: usize,
+    ws: Workspace,
     /// Receives keys when no file is open, so `:` commands still work.
     scratch: Buffer,
     vim: Vim,
@@ -46,8 +46,7 @@ impl VexApp {
     pub fn new(cc: &eframe::CreationContext<'_>, root: PathBuf, file: Option<PathBuf>) -> Self {
         theme::install(&cc.egui_ctx);
         let mut app = Self {
-            tabs: Vec::new(),
-            active: 0,
+            ws: Workspace::default(),
             scratch: Buffer::default(),
             vim: Vim::default(),
             explorer: Explorer::new(root),
@@ -125,6 +124,14 @@ impl VexApp {
         self.vim.message_is_error = true;
     }
 
+    /// Something changed which view is focused.
+    fn focus_changed(&mut self) {
+        if self.vim.mode != Mode::Insert || self.ws.current().is_none() {
+            self.vim.mode = Mode::Normal;
+        }
+        self.follow_cursor = true;
+    }
+
     fn resolve(&self, p: &Path) -> PathBuf {
         let p = match p.strip_prefix("~") {
             Ok(rest) => std::env::var_os("HOME").map_or(p.to_path_buf(), |h| PathBuf::from(h).join(rest)),
@@ -134,69 +141,62 @@ impl VexApp {
         p.canonicalize().unwrap_or(p)
     }
 
+    /// Open `path` in the focused pane (switching to it if already open there).
     fn open(&mut self, path: &Path) {
         let path = self.resolve(path);
         if path.is_dir() {
             self.error(format!("\"{}\" is a directory", path.display()));
             return;
         }
-        if let Some(i) = self.tabs.iter().position(|b| b.path.as_deref() == Some(path.as_path())) {
-            self.switch_to(i);
-            return;
-        }
-        match Buffer::open(&path) {
-            Ok(b) => {
-                self.tabs.push(b);
-                self.switch_to(self.tabs.len() - 1);
-                self.explorer.reveal(&path);
+        if let Some(b) = self.ws.find(&path) {
+            self.ws.show(b);
+        } else {
+            match Buffer::open(&path) {
+                Ok(b) => {
+                    self.ws.add_buffer(b);
+                    self.explorer.reveal(&path);
+                }
+                Err(e) => {
+                    self.error(format!("Cannot open {}: {e}", path.display()));
+                    return;
+                }
             }
-            Err(e) => self.error(format!("Cannot open {}: {e}", path.display())),
-        }
-    }
-
-    fn switch_to(&mut self, i: usize) {
-        if i < self.tabs.len() {
-            self.active = i;
-            self.vim.mode = Mode::Normal;
-            self.follow_cursor = true;
-        }
-    }
-
-    fn cycle_tab(&mut self, delta: isize) {
-        let n = self.tabs.len() as isize;
-        if n > 0 {
-            self.switch_to((self.active as isize + delta).rem_euclid(n) as usize);
-        }
-    }
-
-    fn close_tab(&mut self, i: usize, force: bool) -> bool {
-        if i >= self.tabs.len() {
-            return false;
-        }
-        if self.tabs[i].dirty && !force {
-            self.error("E37: No write since last change (add ! to override)");
-            return false;
-        }
-        self.tabs.remove(i);
-        if self.active > i || self.active >= self.tabs.len() {
-            self.active = self.active.saturating_sub(1);
         }
         self.vim.mode = Mode::Normal;
         self.follow_cursor = true;
-        true
     }
 
-    fn save(&mut self, i: usize, path: Option<String>) -> bool {
+    fn close_tab(&mut self, group: usize, tab: usize, force: bool) -> bool {
+        match self.ws.close_tab(group, tab, force) {
+            Ok(()) => {
+                self.focus_changed();
+                true
+            }
+            Err(e) => {
+                self.error(e);
+                false
+            }
+        }
+    }
+
+    fn close_current(&mut self, force: bool) -> bool {
+        let g = self.ws.focus;
+        let active = self.ws.groups[g].active;
+        self.close_tab(g, active, force)
+    }
+
+    /// Write buffer `b`, or the scratch buffer when `b` is `None` and a path is given.
+    fn save(&mut self, b: Option<usize>, path: Option<String>) -> bool {
         let path = path.map(|p| self.resolve(Path::new(&p)));
-        if self.tabs.is_empty() {
-            if path.is_none() {
+        let b = match b {
+            Some(b) => b,
+            None if path.is_some() => self.ws.add_buffer(std::mem::take(&mut self.scratch)),
+            None => {
                 self.error("E32: No file name");
                 return false;
             }
-            self.tabs.push(std::mem::take(&mut self.scratch));
-            self.active = 0;
-        }
-        let buf = &mut self.tabs[i];
+        };
+        let buf = &mut self.ws.buffers[b];
         if let Some(p) = path {
             buf.path = Some(p);
         }
@@ -223,40 +223,49 @@ impl VexApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
+    /// `:q` on an empty pane closes the pane; on the last empty pane, the window.
+    fn quit_empty(&mut self, ctx: &egui::Context) {
+        if !self.ws.close_empty_group() {
+            self.quit_window(ctx);
+        }
+        self.focus_changed();
+    }
+
     fn handle_action(&mut self, ctx: &egui::Context, action: Action) {
+        let cur = self.ws.current();
         match action {
             Action::Write(p) => {
-                self.save(self.active, p);
+                self.save(cur, p);
             }
             Action::WriteAll => {
-                for i in 0..self.tabs.len() {
-                    if self.tabs[i].dirty {
-                        self.save(i, None);
+                for b in 0..self.ws.buffers.len() {
+                    if self.ws.buffers[b].dirty {
+                        self.save(Some(b), None);
                     }
                 }
             }
-            Action::WriteQuit => {
-                if self.tabs.is_empty() {
-                    self.quit_window(ctx);
-                } else if self.save(self.active, None) {
-                    self.close_tab(self.active, true);
+            Action::WriteQuit => match cur {
+                None => self.quit_empty(ctx),
+                Some(b) => {
+                    if self.save(Some(b), None) {
+                        self.close_current(true);
+                    }
                 }
-            }
+            },
             Action::WriteQuitAll => {
-                let ok = (0..self.tabs.len()).all(|i| !self.tabs[i].dirty || self.save(i, None));
+                let ok = (0..self.ws.buffers.len()).all(|b| !self.ws.buffers[b].dirty || self.save(Some(b), None));
                 if ok {
                     self.quit_window(ctx);
                 }
             }
-            Action::Quit { force } => {
-                if self.tabs.is_empty() {
-                    self.quit_window(ctx);
-                } else {
-                    self.close_tab(self.active, force);
+            Action::Quit { force } => match cur {
+                None => self.quit_empty(ctx),
+                Some(_) => {
+                    self.close_current(force);
                 }
-            }
+            },
             Action::QuitAll { force } => {
-                if let Some(b) = self.tabs.iter().find(|b| b.dirty).filter(|_| !force) {
+                if let Some(b) = self.ws.buffers.iter().find(|b| b.dirty).filter(|_| !force) {
                     let msg = format!("E162: No write since last change for buffer \"{}\"", b.name());
                     self.error(msg);
                 } else {
@@ -264,17 +273,50 @@ impl VexApp {
                 }
             }
             Action::Edit(p) => self.open(Path::new(&p)),
-            Action::NextTab => self.cycle_tab(1),
-            Action::PrevTab => self.cycle_tab(-1),
+            Action::NextTab => {
+                self.ws.cycle_tab(1);
+                self.focus_changed();
+            }
+            Action::PrevTab => {
+                self.ws.cycle_tab(-1);
+                self.focus_changed();
+            }
             Action::Set(args) => self.set_options(ctx, &args),
             Action::OpenSettings => self.open_settings(),
+            Action::Split(p) => {
+                self.ws.split();
+                self.focus_changed();
+                if let Some(p) = p {
+                    self.open(Path::new(&p));
+                }
+            }
+            Action::Window(c) => {
+                match c {
+                    'h' => self.ws.focus_step(-1, false),
+                    'l' => self.ws.focus_step(1, false),
+                    'w' => self.ws.focus_step(1, true),
+                    'W' => self.ws.focus_step(-1, true),
+                    'v' | 's' => return self.handle_action(ctx, Action::Split(None)),
+                    'q' | 'c' => return self.handle_action(ctx, Action::Quit { force: false }),
+                    'o' => {
+                        if let Err(e) = self.ws.only(false) {
+                            self.error(e);
+                        }
+                    }
+                    _ => {}
+                }
+                self.focus_changed();
+            }
         }
     }
 
     // ---- input ---------------------------------------------------------
 
     fn feed(&mut self, ctx: &egui::Context, key: Key) {
-        let buf = if self.tabs.is_empty() { &mut self.scratch } else { &mut self.tabs[self.active] };
+        let buf = match self.ws.current() {
+            Some(b) => &mut self.ws.buffers[b],
+            None => &mut self.scratch,
+        };
         let action = self.vim.handle_key(buf, key);
         self.follow_cursor = true;
         if let Some(text) = self.vim.clipboard_out.take() {
@@ -289,8 +331,8 @@ impl VexApp {
     fn shortcut(&mut self, ctx: &egui::Context, key: EKey, shift: bool) -> bool {
         match key {
             EKey::S => {
-                if !self.tabs.is_empty() {
-                    self.save(self.active, None);
+                if let Some(b) = self.ws.current() {
+                    self.save(Some(b), None);
                 }
             }
             EKey::P if shift => {
@@ -309,8 +351,14 @@ impl VexApp {
                 };
             }
             EKey::B => self.show_sidebar = !self.show_sidebar,
-            EKey::Tab | EKey::PageDown if !shift => self.cycle_tab(1),
-            EKey::Tab | EKey::PageUp => self.cycle_tab(-1),
+            EKey::Tab | EKey::PageDown if !shift => self.handle_action(ctx, Action::NextTab),
+            EKey::Tab | EKey::PageUp => self.handle_action(ctx, Action::PrevTab),
+            EKey::Backslash => self.handle_action(ctx, Action::Split(None)),
+            EKey::Num1 | EKey::Num2 | EKey::Num3 | EKey::Num4 | EKey::Num5 => {
+                let n = key.name().parse::<usize>().unwrap_or(1);
+                self.ws.focus_group(n - 1);
+                self.focus_changed();
+            }
             EKey::Equals | EKey::Plus => self.settings.font_size = (self.settings.font_size + 1.0).min(48.0),
             EKey::Minus => self.settings.font_size = (self.settings.font_size - 1.0).max(6.0),
             EKey::Num0 => {
@@ -378,7 +426,10 @@ impl VexApp {
                     }
                 }
                 egui::Event::Paste(t) if self.quick_open.is_none() => {
-                    let buf = if self.tabs.is_empty() { &mut self.scratch } else { &mut self.tabs[self.active] };
+                    let buf = match self.ws.current() {
+                        Some(b) => &mut self.ws.buffers[b],
+                        None => &mut self.scratch,
+                    };
                     self.vim.paste_text(buf, &t);
                     self.follow_cursor = true;
                 }
@@ -391,7 +442,7 @@ impl VexApp {
         if !ctx.input(|i| i.viewport().close_requested()) || self.allow_close {
             return;
         }
-        let dirty: Vec<String> = self.tabs.iter().filter(|b| b.dirty).map(|b| b.name()).collect();
+        let dirty: Vec<String> = self.ws.buffers.iter().filter(|b| b.dirty).map(|b| b.name()).collect();
         if !dirty.is_empty() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.error(format!("Unsaved changes in {} — :wqa to save and quit, :qa! to discard", dirty.join(", ")));
@@ -400,7 +451,7 @@ impl VexApp {
 
     fn update_title(&mut self, ctx: &egui::Context) {
         let root = self.explorer.root_name();
-        let title = match self.tabs.get(self.active) {
+        let title = match self.ws.current_buf() {
             Some(b) => format!("{}{} — {} — Vex", if b.dirty { "● " } else { "" }, b.name(), root),
             None => format!("{root} — Vex"),
         };
@@ -465,7 +516,7 @@ impl VexApp {
             self.explorer.refresh();
         }
 
-        let active_path = self.tabs.get(self.active).and_then(|b| b.path.clone());
+        let active_path = self.ws.current_buf().and_then(|b| b.path.clone());
         let mut clicked: Option<(PathBuf, bool)> = None;
         let rows = self.explorer.rows();
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -508,35 +559,43 @@ impl VexApp {
         }
     }
 
-    fn tab_bar(&mut self, ui: &mut Ui) {
-        let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 35.0), Sense::hover());
+    fn tab_bar(&mut self, ui: &mut Ui, bar: Rect, group: usize) {
         let painter = ui.painter_at(bar);
-        painter.rect_filled(bar, 0.0, theme::p().tabs_bg);
+        let p = theme::p();
+        painter.rect_filled(bar, 0.0, p.tabs_bg);
+        let focused_group = group == self.ws.focus;
         let mut x = bar.left();
         let mut action: Option<(usize, bool)> = None; // (index, close)
-        for (i, b) in self.tabs.iter().enumerate() {
-            let active = i == self.active;
-            let name = galley(ui.ctx(), b.name(), UI_SIZE, if active { theme::p().text_bright } else { theme::p().text_muted });
+        let g = &self.ws.groups[group];
+        for (i, t) in g.tabs.iter().enumerate() {
+            let b = &self.ws.buffers[t.buf];
+            let active = i == g.active;
+            let color = match (active, focused_group) {
+                (true, true) => p.text_bright,
+                (true, false) => p.text_ui,
+                _ => p.text_muted,
+            };
+            let name = galley(ui.ctx(), b.name(), UI_SIZE, color);
             let w = 12.0 + 16.0 + 4.0 + name.size().x + 8.0 + 20.0 + 6.0;
             let r = Rect::from_min_size(pos2(x, bar.top()), vec2(w, bar.height()));
-            let resp = ui.interact(r, ui.scope_id().with(("tab", i)), Sense::click());
-            painter.rect_filled(r, 0.0, if active { theme::p().editor_bg } else { theme::p().tab_inactive });
-            painter.line_segment([r.right_top(), r.right_bottom()], Stroke::new(1.0, theme::p().tabs_bg));
-            if active {
-                painter.line_segment([r.left_top(), r.right_top()], Stroke::new(1.0, theme::p().status_bg));
+            let resp = ui.interact(r, ui.scope_id().with(("tab", group, i)), Sense::click());
+            painter.rect_filled(r, 0.0, if active { p.editor_bg } else { p.tab_inactive });
+            painter.line_segment([r.right_top(), r.right_bottom()], Stroke::new(1.0, p.tabs_bg));
+            if active && focused_group {
+                painter.line_segment([r.left_top(), r.right_top()], Stroke::new(1.0, p.status_bg));
             }
             draw_file_icon(&painter, pos2(r.left() + 20.0, r.center().y), theme::file_color(&b.name()));
-            painter.galley(pos2(r.left() + 32.0, r.center().y - name.size().y / 2.0), name, theme::p().text_ui);
+            painter.galley(pos2(r.left() + 32.0, r.center().y - name.size().y / 2.0), name, p.text_ui);
 
             let close = Rect::from_center_size(pos2(r.right() - 16.0, r.center().y), vec2(20.0, 20.0));
-            let close_resp = ui.interact(close, ui.scope_id().with(("tab-close", i)), Sense::click());
+            let close_resp = ui.interact(close, ui.scope_id().with(("tab-close", group, i)), Sense::click());
             if close_resp.hovered() {
-                painter.rect_filled(close, CornerRadius::same(4), Color32::from_gray(0x50));
+                painter.rect_filled(close, CornerRadius::same(4), p.list_hover);
             }
             if b.dirty && !close_resp.hovered() {
-                painter.circle_filled(close.center(), 4.0, theme::p().text_ui);
+                painter.circle_filled(close.center(), 4.0, p.text_ui);
             } else if active || resp.hovered() || close_resp.hovered() {
-                draw_x(&painter, close.center(), 4.0, theme::p().text_ui);
+                draw_x(&painter, close.center(), 4.0, p.text_ui);
             }
             if close_resp.clicked() || resp.middle_clicked() {
                 action = Some((i, true));
@@ -547,18 +606,21 @@ impl VexApp {
         }
         match action {
             Some((i, true)) => {
-                self.close_tab(i, false);
+                self.close_tab(group, i, false);
             }
-            Some((i, false)) => self.switch_to(i),
+            Some((i, false)) => {
+                self.ws.activate(group, i);
+                self.focus_changed();
+            }
             None => {}
         }
     }
 
-    fn breadcrumbs(&mut self, ui: &mut Ui) {
-        let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
+    fn breadcrumbs(&mut self, ui: &mut Ui, r: Rect, group: usize) {
         let painter = ui.painter_at(r);
         painter.rect_filled(r, 0.0, theme::p().editor_bg);
-        let Some(path) = self.tabs.get(self.active).and_then(|b| b.path.as_ref()) else { return };
+        let g = &self.ws.groups[group];
+        let Some(path) = g.tabs.get(g.active).and_then(|t| self.ws.buffers[t.buf].path.as_ref()) else { return };
         let rel = path.strip_prefix(&self.explorer.root).unwrap_or(path);
         let parts: Vec<String> = rel.iter().map(|p| p.to_string_lossy().into_owned()).collect();
         let mut x = r.left() + 16.0;
@@ -590,7 +652,7 @@ impl VexApp {
         painter.rect_filled(badge, 0.0, theme::mode_color(mode));
         painter.galley(badge.center() - label.size() / 2.0, label, white);
         let mut x = badge.right() + 10.0;
-        if let Some(name) = self.tabs.get(self.active).map(|b| b.name()) {
+        if let Some(name) = self.ws.current_buf().map(|b| b.name()) {
             let r = painter.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, name, font.clone(), white);
             x = r.right() + 14.0;
         }
@@ -604,7 +666,7 @@ impl VexApp {
         }
 
         // Right: cursor position and file info.
-        let buf = self.tabs.get(self.active);
+        let buf = self.ws.current_buf();
         let mut items: Vec<String> = Vec::new();
         if let Some(b) = buf {
             items.push(syntax::language_name(&b.extension()).to_string());
@@ -631,23 +693,59 @@ impl VexApp {
 
     // ---- editor --------------------------------------------------------
 
-    fn editor(&mut self, ui: &mut Ui) {
-        let rect = ui.available_rect_before_wrap();
-        if self.tabs.is_empty() {
-            let painter = ui.painter_at(rect);
-            painter.rect_filled(rect, 0.0, theme::p().editor_bg);
-            draw_welcome(&painter, rect);
+    /// The editor area: one column per group, each with tabs, breadcrumbs and a view.
+    fn editor_area(&mut self, ui: &mut Ui) {
+        let area = ui.available_rect_before_wrap();
+        let n = self.ws.groups.len();
+        if n == 1 && self.ws.groups[0].tabs.is_empty() {
+            let painter = ui.painter_at(area);
+            painter.rect_filled(area, 0.0, theme::p().editor_bg);
+            draw_welcome(&painter, area);
             return;
         }
-        let view = View {
-            buf: &mut self.tabs[self.active],
-            vim: &mut self.vim,
-            settings: &self.settings,
-            focused: true,
-            follow_cursor: std::mem::take(&mut self.follow_cursor),
-            drag_anchor: &mut self.drag_anchor,
-        };
-        view.show(ui, rect, ui.scope_id().with("editor"));
+        let w = area.width() / n as f32;
+        let mut clicked_group = None;
+        for g in 0..n {
+            let col = Rect::from_min_size(pos2(area.left() + g as f32 * w, area.top()), vec2(w, area.height()));
+            let tabs = Rect::from_min_size(col.min, vec2(w, 35.0));
+            let crumbs = Rect::from_min_size(pos2(col.left(), tabs.bottom()), vec2(w, 22.0));
+            let body = Rect::from_min_max(pos2(col.left(), crumbs.bottom()), col.max);
+            if g >= self.ws.groups.len() {
+                break; // a tab close removed this group mid-frame
+            }
+            self.tab_bar(ui, tabs, g);
+            if g >= self.ws.groups.len() {
+                break;
+            }
+            self.breadcrumbs(ui, crumbs, g);
+
+            let follow = g == self.ws.focus && std::mem::take(&mut self.follow_cursor);
+            let (vim, settings, drag) = (&mut self.vim, &self.settings, &mut self.drag_anchor);
+            let resp = self.ws.with_view(g, |buf, focused| {
+                let view = View { buf, vim, settings, focused, follow_cursor: follow, drag_anchor: drag };
+                view.show(ui, body, ui.scope_id().with(("editor", g)))
+            });
+            match resp {
+                Some(r) if r.clicked() || r.drag_started() => clicked_group = Some(g),
+                Some(_) => {}
+                None => {
+                    // An empty pane beside others.
+                    let painter = ui.painter_at(body);
+                    painter.rect_filled(body, 0.0, theme::p().editor_bg);
+                    painter.text(body.center(), Align2::CENTER_CENTER, "Empty pane — :e <file> or Ctrl+P", FontId::proportional(UI_SIZE), theme::p().text_muted);
+                    if ui.interact(body, ui.scope_id().with(("empty", g)), Sense::click()).clicked() {
+                        clicked_group = Some(g);
+                    }
+                }
+            }
+            if g > 0 {
+                ui.painter().line_segment([col.left_top(), col.left_bottom()], Stroke::new(1.0, theme::p().border));
+            }
+        }
+        if let Some(g) = clicked_group.filter(|&g| g != self.ws.focus) {
+            self.ws.focus_group(g);
+            self.focus_changed();
+        }
     }
 
     // ---- overlays ------------------------------------------------------
@@ -792,13 +890,7 @@ impl eframe::App for VexApp {
                 .frame(Frame::NONE.fill(theme::p().sidebar_bg))
                 .show(ui, |ui| self.sidebar(ui));
         }
-        egui::CentralPanel::no_frame().show(ui, |ui| {
-            if !self.tabs.is_empty() {
-                self.tab_bar(ui);
-                self.breadcrumbs(ui);
-            }
-            self.editor(ui);
-        });
+        egui::CentralPanel::no_frame().show(ui, |ui| self.editor_area(ui));
 
         self.quick_open_overlay(&ctx);
         self.cmdline_overlay(&ctx);

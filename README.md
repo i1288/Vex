@@ -36,6 +36,8 @@ The status bar badge shows the current mode: **NORMAL**, **INSERT**, **VISUAL** 
 | `/ ?` `n N` `* #` | search (regex, smartcase) |
 | `v V` | visual / visual line |
 | `gt gT` | next / previous tab |
+| `Ctrl-w h/l` `Ctrl-w w` | focus pane left / right / next |
+| `Ctrl-w v` `Ctrl-w q` `Ctrl-w o` | split / close / keep only this pane |
 | counts | `3dw`, `5j`, `2dd` … |
 
 | Command line (`:`) | |
@@ -49,6 +51,7 @@ The status bar badge shows the current mode: **NORMAL**, **INSERT**, **VISUAL** 
 | `:noh` | clear search highlight |
 | `:bn` `:bp` | next / previous tab |
 | `:set …` `:settings` | change options / open settings file |
+| `:vsp [file]` `:only` | split pane (side by side) / close other panes |
 
 | App shortcuts | |
 |---|---|
@@ -56,6 +59,8 @@ The status bar badge shows the current mode: **NORMAL**, **INSERT**, **VISUAL** 
 | `Ctrl+Shift+P` | command line |
 | `Ctrl+S` | save |
 | `Ctrl+B` | toggle sidebar |
+| `Ctrl+\` | split editor |
+| `Ctrl+1` … `Ctrl+5` | focus pane N |
 | `Ctrl+Tab` / `Ctrl+PageDown` | next tab |
 | `Ctrl+=` `Ctrl+-` `Ctrl+0` | zoom editor font |
 | `Ctrl+,` | open settings |
@@ -89,6 +94,7 @@ src/
   main.rs      entry point, CLI args
   app.rs       window layout, input routing, overlays
   view.rs      editor view: text drawing, soft wrap, mouse
+  workspace.rs open buffers, split panes, per-tab cursor and scroll
   vim.rs       modal editing engine (GUI-independent, unit tested)
   buffer.rs    text buffer, file I/O, undo/redo
   syntax.rs    keyword-based syntax highlighting

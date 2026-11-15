@@ -62,6 +62,10 @@ pub enum Action {
     /// `:set` arguments, applied by the app.
     Set(String),
     OpenSettings,
+    /// Split the focused pane, optionally opening a file in the new one.
+    Split(Option<String>),
+    /// A `Ctrl-w` window command: h l w W v s q c o.
+    Window(char),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -292,6 +296,13 @@ fn parse_simple(keys: &[Key], i: usize, count: Option<usize>) -> Parse<Cmd> {
             _ => return Parse::Invalid,
         },
         Key::Ctrl('r') => "C-r",
+        Key::Ctrl('w') => {
+            return match keys.get(i + 1) {
+                None => Parse::Incomplete,
+                Some(Key::Char(c) | Key::Ctrl(c)) => Parse::Done(Cmd::Simple("C-w", count, Some(*c))),
+                _ => Parse::Invalid,
+            };
+        }
         Key::Ctrl('d') => "C-d",
         Key::Ctrl('u') => "C-u",
         Key::Ctrl('f') | Key::PageDown => "C-f",
@@ -868,6 +879,7 @@ impl Vim {
                 }
                 self.replaying = false;
             }
+            "C-w" => return arg.map(Action::Window),
             "gt" => return Some(Action::NextTab),
             "gT" => return Some(Action::PrevTab),
             "ZZ" => return Some(Action::WriteQuit),
@@ -1536,6 +1548,8 @@ impl Vim {
                 Some(path) => return Some(Action::Edit(path)),
                 None => self.error("E32: No file name"),
             },
+            "vsp" | "vsplit" | "vs" | "sp" | "split" | "vnew" | "new" => return Some(Action::Split(arg)),
+            "only" | "on" => return Some(Action::Window('o')),
             "bn" | "bnext" | "tabn" | "tabnext" => return Some(Action::NextTab),
             "bp" | "bprev" | "bprevious" | "tabp" | "tabprev" => return Some(Action::PrevTab),
             "set" | "se" => return Some(Action::Set(arg.unwrap_or_default())),
@@ -1867,6 +1881,18 @@ mod tests {
         let line: Vec<char> = "héllo wörld".chars().collect();
         let re = build_regex("w.r");
         assert_eq!(search_matches(&line, &re), vec![(6, 9)]);
+    }
+
+    #[test]
+    fn window_commands() {
+        let mut b = Buffer::from_str("");
+        let mut v = Vim::default();
+        v.handle_key(&mut b, Key::Ctrl('w'));
+        assert_eq!(v.handle_key(&mut b, Key::Char('l')), Some(Action::Window('l')));
+        v.handle_key(&mut b, Key::Ctrl('w'));
+        assert_eq!(v.handle_key(&mut b, Key::Ctrl('w')), Some(Action::Window('w')));
+        feed(&mut b, &mut v, ":vsp src/a.rs");
+        assert_eq!(v.handle_key(&mut b, Key::Enter), Some(Action::Split(Some("src/a.rs".into()))));
     }
 
     #[test]

@@ -7,6 +7,7 @@ mod syntax;
 mod theme;
 mod view;
 mod vim;
+mod workspace;
 
 use std::path::PathBuf;
 
