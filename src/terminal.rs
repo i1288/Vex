@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn color_cube() {
-        let p = &crate::theme::DARK;
+        let p = &crate::theme::DARK_MODERN;
         assert_eq!(color(vt100::Color::Idx(196), true, false, p), Color32::from_rgb(255, 0, 0));
         assert_eq!(color(vt100::Color::Idx(232), true, false, p), Color32::from_rgb(8, 8, 8));
         assert_eq!(color(vt100::Color::Idx(1), true, true, p), p.ansi[9]);

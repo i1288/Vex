@@ -17,6 +17,7 @@ pub struct Settings {
     pub tab_size: usize,
     pub insert_spaces: bool,
     pub word_wrap: bool,
+    pub minimap: bool,
     pub line_numbers: bool,
     pub relative_line_numbers: bool,
     pub indent_guides: bool,
@@ -31,6 +32,7 @@ impl Default for Settings {
             tab_size: 4,
             insert_spaces: true,
             word_wrap: false,
+            minimap: true,
             line_numbers: true,
             relative_line_numbers: false,
             indent_guides: true,
@@ -43,7 +45,7 @@ impl Default for Settings {
 const TEMPLATE: &str = r#"# Vex settings. Save this file to apply changes.
 # For changes that last only this session, use :set (e.g. :set ts=2, :set rnu).
 
-# "dark" or "light"
+# "dark" or "light" (VS Code Modern), or the classic "dark-plus" / "light-plus"
 theme = "dark"
 
 # Editor font size in points (Ctrl+= / Ctrl+- zoom for the session)
@@ -57,6 +59,9 @@ insert_spaces = true
 
 # Wrap long lines at the window edge (Alt+Z toggles)
 word_wrap = false
+
+# Code overview on the right edge of the editor
+minimap = true
 
 line_numbers = true
 relative_line_numbers = false
@@ -114,8 +119,9 @@ pub fn ensure_file() -> io::Result<PathBuf> {
 
 impl Settings {
     fn validate(&self) -> Result<(), String> {
-        if !matches!(self.theme.as_str(), "dark" | "light") {
-            return Err(format!("unknown theme \"{}\" (use \"dark\" or \"light\")", self.theme));
+        if theme::lookup(&self.theme).is_none() {
+            let names: Vec<&str> = theme::PALETTES.iter().map(|p| p.name).collect();
+            return Err(format!("unknown theme \"{}\" (use {})", self.theme, names.join(", ")));
         }
         if !(1..=16).contains(&self.tab_size) {
             return Err("tab_size must be between 1 and 16".into());
@@ -184,6 +190,7 @@ impl Settings {
             "relativenumber" | "rnu" => &mut self.relative_line_numbers,
             "expandtab" | "et" => &mut self.insert_spaces,
             "wrap" => &mut self.word_wrap,
+            "minimap" | "mm" => &mut self.minimap,
             "indentguides" | "ig" => &mut self.indent_guides,
             _ => return None,
         })
@@ -228,6 +235,19 @@ mod tests {
         assert!(parse("theme = \"neon\"").is_err());
         assert!(parse("tab_size = 0").is_err());
         assert!(parse("tab_size = \"x\"").is_err());
+    }
+
+    #[test]
+    fn themes_and_minimap() {
+        for name in ["dark", "light", "dark-plus", "light-plus", "dark+", "light-modern"] {
+            assert!(parse(&format!("theme = \"{name}\"")).is_ok(), "{name}");
+        }
+        let mut s = Settings::default();
+        assert!(s.minimap, "minimap is on by default");
+        s.set("nominimap").unwrap();
+        assert!(!s.minimap);
+        s.set("minimap!").unwrap();
+        assert!(s.minimap);
     }
 
     #[test]

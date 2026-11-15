@@ -273,6 +273,7 @@ impl VexApp {
                 self.settings.word_wrap = !self.settings.word_wrap;
                 self.follow_cursor = true;
             }
+            Command::ToggleMinimap => self.settings.minimap = !self.settings.minimap,
             Command::SplitEditor => self.handle_action(ctx, Action::Split(None)),
             Command::NextTab => self.handle_action(ctx, Action::NextTab),
             Command::PrevTab => self.handle_action(ctx, Action::PrevTab),
@@ -698,9 +699,9 @@ impl VexApp {
         let r = icon(0);
         let resp = ui.interact(r, ui.scope_id().with("act-explorer"), Sense::click());
         let active = self.show_sidebar;
-        let color = if active || resp.hovered() { theme::p().bar_fg } else { theme::p().icon_inactive };
+        let color = if active || resp.hovered() { theme::p().activity_fg } else { theme::p().icon_inactive };
         if active {
-            painter.rect_filled(Rect::from_min_size(r.min, vec2(2.0, 48.0)), 0.0, theme::p().bar_fg);
+            painter.rect_filled(Rect::from_min_size(r.min, vec2(2.0, 48.0)), 0.0, theme::p().accent);
         }
         draw_files_icon(painter, r.center(), color);
         if resp.clicked() {
@@ -710,7 +711,7 @@ impl VexApp {
 
         let r = icon(1);
         let resp = ui.interact(r, ui.scope_id().with("act-search"), Sense::click());
-        let color = if self.quick_open.is_some() || resp.hovered() { theme::p().bar_fg } else { theme::p().icon_inactive };
+        let color = if self.quick_open.is_some() || resp.hovered() { theme::p().activity_fg } else { theme::p().icon_inactive };
         draw_search_icon(painter, r.center(), color);
         if resp.clicked() {
             self.run_command(&ui.ctx().clone(), Command::QuickOpen);
@@ -720,7 +721,7 @@ impl VexApp {
         // Bottom: the gear, like VS Code's Manage button.
         let r = Rect::from_min_size(pos2(rect.left(), rect.bottom() - 48.0), vec2(48.0, 48.0));
         let resp = ui.interact(r, ui.scope_id().with("act-keys"), Sense::click());
-        let color = if self.keys_panel.is_some() || resp.hovered() { theme::p().bar_fg } else { theme::p().icon_inactive };
+        let color = if self.keys_panel.is_some() || resp.hovered() { theme::p().activity_fg } else { theme::p().icon_inactive };
         draw_gear_icon(ui.painter(), r.center(), color);
         if resp.clicked() {
             self.open_keys_panel();
@@ -803,6 +804,7 @@ impl VexApp {
         let focused_group = group == self.ws.focus;
         let mut x = bar.left();
         let mut action: Option<(usize, bool)> = None; // (index, close)
+        let mut active_span = None;
         let g = &self.ws.groups[group];
         for (i, t) in g.tabs.iter().enumerate() {
             let b = &self.ws.buffers[t.buf];
@@ -817,9 +819,13 @@ impl VexApp {
             let r = Rect::from_min_size(pos2(x, bar.top()), vec2(w, bar.height()));
             let resp = ui.interact(r, ui.scope_id().with(("tab", group, i)), Sense::click());
             painter.rect_filled(r, 0.0, if active { p.editor_bg } else { p.tab_inactive });
-            painter.line_segment([r.right_top(), r.right_bottom()], Stroke::new(1.0, p.tabs_bg));
-            if active && focused_group {
-                painter.line_segment([r.left_top(), r.right_top()], Stroke::new(1.0, p.status_bg));
+            painter.line_segment([r.right_top(), r.right_bottom()], Stroke::new(1.0, p.separator));
+            if active {
+                active_span = Some((r.left(), r.right()));
+                if focused_group {
+                    let top = Rect::from_min_size(r.min, vec2(r.width(), 2.0));
+                    painter.rect_filled(top, 0.0, p.accent);
+                }
             }
             draw_file_icon(&painter, pos2(r.left() + 20.0, r.center().y), theme::file_color(&b.name()));
             painter.galley(pos2(r.left() + 32.0, r.center().y - name.size().y / 2.0), name, p.text_ui);
@@ -840,6 +846,50 @@ impl VexApp {
                 action = Some((i, false));
             }
             x += w;
+        }
+        // The bottom border runs under every tab but the active one, which joins the editor.
+        let y = bar.bottom() - 0.5;
+        let stroke = Stroke::new(1.0, p.separator);
+        match active_span {
+            Some((a, b)) => {
+                painter.line_segment([pos2(bar.left(), y), pos2(a, y)], stroke);
+                painter.line_segment([pos2(b, y), pos2(bar.right(), y)], stroke);
+            }
+            None => {
+                painter.line_segment([pos2(bar.left(), y), pos2(bar.right(), y)], stroke);
+            }
+        }
+
+        // Editor actions at the right end, like VS Code's title-bar buttons.
+        let actions = Rect::from_min_max(pos2(bar.right() - 64.0, bar.top()), pos2(bar.right(), bar.bottom() - 1.0));
+        painter.rect_filled(actions, 0.0, p.tabs_bg);
+        let buttons = [
+            ("split", "Split Editor", self.keys.label(Command::SplitEditor)),
+            ("minimap", "Toggle Minimap", self.keys.label(Command::ToggleMinimap)),
+        ];
+        for (i, (kind, title, keys)) in buttons.into_iter().enumerate() {
+            let r = Rect::from_center_size(pos2(actions.left() + 18.0 + i as f32 * 26.0, actions.center().y), vec2(22.0, 22.0));
+            let resp = ui.interact(r, ui.scope_id().with(("tab-action", group, kind)), Sense::click());
+            let on = kind == "minimap" && self.settings.minimap;
+            if resp.hovered() || on {
+                painter.rect_filled(r, CornerRadius::same(4), p.list_hover);
+            }
+            let color = if resp.hovered() || on { p.text_bright } else { p.text_muted };
+            match kind {
+                "split" => draw_split_icon(&painter, r.center(), color),
+                _ => draw_minimap_icon(&painter, r.center(), color),
+            }
+            let hover = if keys == "—" { title.to_string() } else { format!("{title} ({keys})") };
+            if resp.on_hover_text(hover).clicked() {
+                let ctx = ui.ctx().clone();
+                if kind == "split" {
+                    self.ws.focus_group(group);
+                    self.run_command(&ctx, Command::SplitEditor);
+                } else {
+                    self.run_command(&ctx, Command::ToggleMinimap);
+                }
+                return;
+            }
         }
         match action {
             Some((i, true)) => {
@@ -881,7 +931,8 @@ impl VexApp {
         let rect = ui.max_rect();
         let painter = ui.painter();
         let font = FontId::proportional(12.0);
-        let white = theme::p().bar_fg;
+        let fg = theme::p().status_fg;
+        let white = Color32::WHITE;
 
         // Left: mode badge, then message.
         let mode = self.vim.mode;
@@ -891,17 +942,18 @@ impl VexApp {
         } else {
             (mode.label(), theme::mode_color(mode))
         };
-        let label = galley(ui.ctx(), label, 12.0, white);
-        let badge = Rect::from_min_size(rect.min, vec2(label.size().x + 20.0, rect.height()));
-        painter.rect_filled(badge, 0.0, badge_color);
+        let label = galley(ui.ctx(), label, 11.5, white);
+        let badge = Rect::from_min_size(rect.min + vec2(6.0, 3.0), vec2(label.size().x + 16.0, rect.height() - 6.0));
+        painter.rect_filled(badge, CornerRadius::same(4), badge_color);
         painter.galley(badge.center() - label.size() / 2.0, label, white);
         let mut x = badge.right() + 10.0;
         if let Some(name) = self.ws.current_buf().map(|b| b.name()) {
-            let r = painter.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, name, font.clone(), white);
+            let r = painter.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, name, font.clone(), fg);
             x = r.right() + 14.0;
         }
         if let Some(msg) = &self.vim.message {
-            let g = galley(ui.ctx(), msg.clone(), 12.0, white);
+            let error = self.vim.message_is_error;
+            let g = galley(ui.ctx(), msg.clone(), 12.0, if error { white } else { fg });
             if self.vim.message_is_error {
                 let bg = Rect::from_min_size(pos2(x - 6.0, rect.top() + 2.0), vec2(g.size().x + 12.0, rect.height() - 4.0));
                 painter.rect_filled(bg, CornerRadius::same(3), Color32::from_rgb(0xc7, 0x2e, 0x0f));
@@ -930,7 +982,7 @@ impl VexApp {
         }
         let mut rx = rect.right() - 10.0;
         for item in items {
-            let r = painter.text(pos2(rx, rect.center().y), Align2::RIGHT_CENTER, item, font.clone(), white);
+            let r = painter.text(pos2(rx, rect.center().y), Align2::RIGHT_CENTER, item, font.clone(), fg);
             rx = r.left() - 18.0;
         }
     }
@@ -985,7 +1037,7 @@ impl VexApp {
                 }
             }
             if g > 0 {
-                ui.painter().line_segment([col.left_top(), col.left_bottom()], Stroke::new(1.0, theme::p().border));
+                ui.painter().line_segment([col.left_top(), col.left_bottom()], Stroke::new(1.0, theme::p().separator));
             }
         }
         if let Some(g) = clicked_group {
@@ -1018,7 +1070,7 @@ impl VexApp {
         );
         painter.line_segment(
             [pos2(title.left(), header.bottom() - 6.0), pos2(title.right(), header.bottom() - 6.0)],
-            Stroke::new(1.0, if self.terminal_focused { p.focus_border } else { p.text_muted }),
+            Stroke::new(1.0, if self.terminal_focused { p.accent } else { p.text_muted }),
         );
         if let Some(t) = &self.terminal {
             painter.text(pos2(title.right() + 16.0, header.center().y), Align2::LEFT_CENTER, &t.name, FontId::proportional(12.0), p.text_muted);
@@ -1364,7 +1416,7 @@ fn overlay_frame(ctx: &egui::Context, id: &str, add: impl FnOnce(&mut Ui)) {
             Frame::NONE
                 .fill(theme::p().widget_bg)
                 .stroke(Stroke::new(1.0, theme::p().border))
-                .corner_radius(6)
+                .corner_radius(8)
                 .inner_margin(6)
                 .shadow(egui::Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(140) })
                 .show(ui, |ui| {
@@ -1433,6 +1485,23 @@ fn draw_gear_icon(p: &Painter, c: egui::Pos2, color: Color32) {
         let dir = vec2(a.cos(), a.sin());
         p.line_segment([c + dir * 8.0, c + dir * 11.0], Stroke::new(3.0, color));
     }
+}
+
+fn draw_split_icon(p: &Painter, c: egui::Pos2, color: Color32) {
+    let r = Rect::from_center_size(c, vec2(14.0, 12.0));
+    p.rect_stroke(r, 1.5, Stroke::new(1.2, color), egui::StrokeKind::Inside);
+    p.line_segment([pos2(c.x, r.top()), pos2(c.x, r.bottom())], Stroke::new(1.2, color));
+}
+
+/// A page with a narrow strip on its right: the minimap.
+fn draw_minimap_icon(p: &Painter, c: egui::Pos2, color: Color32) {
+    let r = Rect::from_center_size(c, vec2(14.0, 12.0));
+    p.rect_stroke(r, 1.5, Stroke::new(1.2, color), egui::StrokeKind::Inside);
+    for (i, w) in [6.0, 4.0, 5.0].iter().enumerate() {
+        let y = r.top() + 3.5 + i as f32 * 2.5;
+        p.line_segment([pos2(r.left() + 2.5, y), pos2(r.left() + 2.5 + w, y)], Stroke::new(1.0, color));
+    }
+    p.line_segment([pos2(r.right() - 4.0, r.top()), pos2(r.right() - 4.0, r.bottom())], Stroke::new(1.0, color));
 }
 
 fn draw_search_icon(p: &Painter, c: egui::Pos2, color: Color32) {

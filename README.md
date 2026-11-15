@@ -4,7 +4,7 @@
 
 A fast code editor written in Rust. It looks like VS Code and edits like Vim.
 
-Vex draws its UI on the GPU with [egui](https://github.com/emilk/egui). It has the VS Code layout (activity bar, file explorer, tabs, breadcrumbs, status bar, Dark+ colors) and a modal editing engine built in from the start.
+Vex draws its UI on the GPU with [egui](https://github.com/emilk/egui). It has the VS Code layout (activity bar, file explorer, tabs, breadcrumbs, minimap, status bar) in VS Code's Dark Modern and Light Modern colors, with the classic Dark+ and Light+ also available. A modal editing engine is built in from the start.
 
 ## Download
 
@@ -123,11 +123,12 @@ Commands useful in mappings: `:terminal`, `:files` (Go to File), `:sidebar`, `:k
 `:settings` (or `Ctrl+,`) opens `~/.config/vex/settings.toml`. Saving it applies the changes right away:
 
 ```toml
-theme = "dark"              # or "light"
+theme = "dark"              # "light", or the classic "dark-plus" / "light-plus"
 font_size = 14.0
 tab_size = 4
 insert_spaces = true
 word_wrap = false
+minimap = true
 line_numbers = true
 relative_line_numbers = false
 indent_guides = true
@@ -135,7 +136,7 @@ scroll_off = 4
 ```
 
 `:set` changes options for the current session only, like Vim:
-`:set wrap`, `:set ts=2`, `:set noet`, `:set rnu`, `:set nu!` (toggle), `:set ts?` (show), `:set` (show all), `:colorscheme light`.
+`:set wrap`, `:set nominimap`, `:set ts=2`, `:set noet`, `:set rnu`, `:set nu!` (toggle), `:set ts?` (show), `:set` (show all), `:colorscheme light`.
 
 ## Layout
 

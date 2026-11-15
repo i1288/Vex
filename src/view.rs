@@ -11,6 +11,10 @@ use crate::theme;
 use crate::vim::{self, Mode, Vim};
 
 const SCROLLBAR_W: f32 = 14.0;
+const MINIMAP_W: f32 = 100.0;
+/// Height of one line in the minimap, and width of one character.
+const MM_ROW: f32 = 2.0;
+const MM_CHAR: f32 = 1.25;
 
 /// How a line is cut into display rows.
 pub struct LineLayout {
@@ -120,7 +124,12 @@ impl View<'_> {
         let digits = buf.line_count().to_string().len().max(3);
         let show_numbers = st.line_numbers || st.relative_line_numbers;
         let gutter_w = if show_numbers { 18.0 + digits as f32 * char_w + 26.0 } else { 14.0 };
-        let text_rect = Rect::from_min_max(pos2(rect.left() + gutter_w, rect.top()), rect.max);
+        // The minimap sits between the text and the scrollbar when there is room.
+        let minimap = (st.minimap && rect.width() > 460.0).then(|| {
+            Rect::from_min_max(pos2(rect.right() - SCROLLBAR_W - MINIMAP_W, rect.top()), pos2(rect.right() - SCROLLBAR_W, rect.bottom()))
+        });
+        let text_right = minimap.map_or(rect.right(), |m| m.left());
+        let text_rect = Rect::from_min_max(pos2(rect.left() + gutter_w, rect.top()), pos2(text_right, rect.bottom()));
         let text_x0 = text_rect.left() + 4.0;
         if focused {
             vim.page_lines = ((rect.height() / line_h) as usize).max(1);
@@ -354,6 +363,11 @@ impl View<'_> {
             }
         }
 
+        if let Some(mm) = minimap {
+            let visible = (first_line, line_of_row(last_row.min(rows.saturating_sub(1))));
+            draw_minimap(ui, &painter, mm, id, buf, lang, visible, line_h, max_scroll, rows, &row_of_line);
+        }
+
         // Vertical scrollbar with a cursor marker, like VS Code's overview ruler.
         let total = max_scroll + rect.height();
         if total > rect.height() + 1.0 {
@@ -375,6 +389,104 @@ impl View<'_> {
         }
         resp
     }
+}
+
+/// The minimap: every line drawn as thin colored strokes, with a slider over
+/// the lines in view. Click to jump, drag the slider to scroll.
+#[allow(clippy::too_many_arguments)]
+fn draw_minimap(
+    ui: &mut Ui,
+    painter: &egui::Painter,
+    mm: Rect,
+    id: egui::Id,
+    buf: &mut Buffer,
+    lang: Option<&syntax::Lang>,
+    visible: (usize, usize),
+    line_h: f32,
+    max_scroll: f32,
+    rows: usize,
+    row_of_line: &[usize],
+) {
+    let p = theme::p();
+    let total = buf.line_count();
+    let capacity = (mm.height() / MM_ROW) as usize;
+    let shown = visible.1 + 1 - visible.0;
+    // When the file is taller than the minimap, the minimap scrolls along with the editor.
+    let first = if total <= capacity {
+        0
+    } else {
+        let frac = if max_scroll > 0.0 { buf.scroll_y / max_scroll } else { 0.0 };
+        ((total - capacity) as f32 * frac).round() as usize
+    };
+
+    let resp = ui.interact(mm, id.with("minimap"), Sense::click_and_drag());
+    let slider = Rect::from_min_size(
+        pos2(mm.left(), mm.top() + visible.0.saturating_sub(first) as f32 * MM_ROW),
+        vec2(mm.width(), (shown as f32 * MM_ROW).max(6.0)),
+    );
+    if resp.dragged() {
+        // Dragging the slider by its own travel moves through the whole file.
+        let travel = (mm.height().min(total as f32 * MM_ROW) - slider.height()).max(1.0);
+        buf.scroll_y = (buf.scroll_y + resp.drag_delta().y / travel * max_scroll).clamp(0.0, max_scroll);
+        ui.ctx().request_repaint();
+    } else if resp.clicked() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            let line = (first + ((pos.y - mm.top()) / MM_ROW) as usize).min(total - 1);
+            let page_rows = (mm.height() / line_h) as usize;
+            let target = row_of_line[line].saturating_sub(page_rows / 2).min(rows.saturating_sub(1));
+            buf.scroll_y = (target as f32 * line_h).clamp(0.0, max_scroll);
+            ui.ctx().request_repaint();
+        }
+    }
+
+    let mm_painter = painter.with_clip_rect(mm);
+    let mut in_block = false;
+    if let Some(lang) = lang {
+        for l in 0..first {
+            syntax::highlight(lang, &buf.lines[l], &mut in_block);
+        }
+    }
+    let max_cols = ((mm.width() - 8.0) / MM_CHAR) as usize;
+    for (i, l) in (first..total.min(first + capacity)).enumerate() {
+        let line = &buf.lines[l];
+        let y = mm.top() + i as f32 * MM_ROW;
+        if l == buf.cursor.line {
+            mm_painter.rect_filled(Rect::from_min_size(pos2(mm.left(), y), vec2(mm.width(), MM_ROW)), 0.0, p.cursor.gamma_multiply(0.25));
+        }
+        if line.iter().all(|c| c.is_whitespace()) {
+            if let Some(lang) = lang {
+                syntax::highlight(lang, line, &mut in_block);
+            }
+            continue;
+        }
+        let spans = match lang {
+            Some(lang) => syntax::highlight(lang, line, &mut in_block),
+            None => vec![(0, line.len(), syntax::Tok::Plain)],
+        };
+        let vcols = LineLayout::new(buf, l, None).vcols;
+        for (s, e, tok) in spans {
+            // One stroke per run of non-blank characters, like tiny words.
+            let mut c = s;
+            while c < e {
+                while c < e && line[c].is_whitespace() {
+                    c += 1;
+                }
+                let start = c;
+                while c < e && !line[c].is_whitespace() {
+                    c += 1;
+                }
+                if start < c && vcols[start] < max_cols {
+                    let x0 = mm.left() + 6.0 + vcols[start] as f32 * MM_CHAR;
+                    let x1 = mm.left() + 6.0 + vcols[c].min(max_cols) as f32 * MM_CHAR;
+                    mm_painter.rect_filled(Rect::from_x_y_ranges(x0..=x1, y..=y + MM_ROW * 0.8), 0.0, tok.color().gamma_multiply(0.9));
+                }
+            }
+        }
+    }
+
+    let alpha = if resp.dragged() { 0.16 } else if resp.hovered() { 0.11 } else { 0.07 };
+    let shade = if p.dark { Color32::WHITE } else { Color32::BLACK };
+    mm_painter.rect_filled(slider, 0.0, shade.gamma_multiply(alpha));
 }
 
 /// Visual width of a line's indentation; blank lines borrow it from neighbors
