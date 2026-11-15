@@ -9,7 +9,14 @@ use std::path::PathBuf;
 use eframe::egui::{Key, Modifiers};
 use serde::{Deserialize, Serialize};
 
-const MAC: bool = cfg!(target_os = "macos");
+/// Whether shortcuts follow macOS conventions (Cmd as the main modifier).
+fn is_mac() -> bool {
+    #[cfg(test)]
+    if let Some(mac) = tests::MAC_OVERRIDE.with(|m| m.get()) {
+        return mac;
+    }
+    cfg!(target_os = "macos")
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Command {
@@ -51,25 +58,25 @@ const fn info(
 }
 
 pub const COMMANDS: &[CommandInfo] = &[
-    info(Command::QuickOpen, "quick_open", "Go to File", &["Ctrl+P"], true),
-    info(Command::CommandLine, "command_line", "Command Line", &["Ctrl+Shift+P"], true),
-    info(Command::Save, "save", "Save File", &["Ctrl+S"], false),
-    info(Command::ToggleSidebar, "toggle_sidebar", "Toggle Sidebar", &["Ctrl+B"], true),
+    info(Command::QuickOpen, "quick_open", "Go to File", &["Cmd+P"], true),
+    info(Command::CommandLine, "command_line", "Command Line", &["Cmd+Shift+P"], true),
+    info(Command::Save, "save", "Save File", &["Cmd+S"], false),
+    info(Command::ToggleSidebar, "toggle_sidebar", "Toggle Sidebar", &["Cmd+B"], true),
     info(Command::ToggleTerminal, "toggle_terminal", "Toggle Terminal", &["Ctrl+`"], true),
     info(Command::ToggleWrap, "toggle_wrap", "Toggle Word Wrap", &["Alt+Z"], false),
-    info(Command::SplitEditor, "split_editor", "Split Editor", &["Ctrl+\\"], false),
-    info(Command::NextTab, "next_tab", "Next Tab", &["Ctrl+Tab", "Ctrl+PageDown"], false),
-    info(Command::PrevTab, "prev_tab", "Previous Tab", &["Ctrl+Shift+Tab", "Ctrl+PageUp"], false),
-    info(Command::ZoomIn, "zoom_in", "Zoom In", &["Ctrl+=", "Ctrl++"], true),
-    info(Command::ZoomOut, "zoom_out", "Zoom Out", &["Ctrl+-"], true),
-    info(Command::ZoomReset, "zoom_reset", "Reset Zoom", &["Ctrl+0"], true),
-    info(Command::OpenSettings, "open_settings", "Open Settings File", &["Ctrl+,"], true),
-    info(Command::Keybindings, "keyboard_shortcuts", "Keyboard Shortcuts", &["Ctrl+K"], true),
-    info(Command::FocusPane(1), "focus_pane_1", "Focus Pane 1", &["Ctrl+1"], true),
-    info(Command::FocusPane(2), "focus_pane_2", "Focus Pane 2", &["Ctrl+2"], true),
-    info(Command::FocusPane(3), "focus_pane_3", "Focus Pane 3", &["Ctrl+3"], true),
-    info(Command::FocusPane(4), "focus_pane_4", "Focus Pane 4", &["Ctrl+4"], true),
-    info(Command::FocusPane(5), "focus_pane_5", "Focus Pane 5", &["Ctrl+5"], true),
+    info(Command::SplitEditor, "split_editor", "Split Editor", &["Cmd+\\"], false),
+    info(Command::NextTab, "next_tab", "Next Tab", &["Ctrl+Tab", "Cmd+PageDown"], false),
+    info(Command::PrevTab, "prev_tab", "Previous Tab", &["Ctrl+Shift+Tab", "Cmd+PageUp"], false),
+    info(Command::ZoomIn, "zoom_in", "Zoom In", &["Cmd+=", "Cmd++"], true),
+    info(Command::ZoomOut, "zoom_out", "Zoom Out", &["Cmd+-"], true),
+    info(Command::ZoomReset, "zoom_reset", "Reset Zoom", &["Cmd+0"], true),
+    info(Command::OpenSettings, "open_settings", "Open Settings File", &["Cmd+,"], true),
+    info(Command::Keybindings, "keyboard_shortcuts", "Keyboard Shortcuts", &["Cmd+K"], true),
+    info(Command::FocusPane(1), "focus_pane_1", "Focus Pane 1", &["Cmd+1"], true),
+    info(Command::FocusPane(2), "focus_pane_2", "Focus Pane 2", &["Cmd+2"], true),
+    info(Command::FocusPane(3), "focus_pane_3", "Focus Pane 3", &["Cmd+3"], true),
+    info(Command::FocusPane(4), "focus_pane_4", "Focus Pane 4", &["Cmd+4"], true),
+    info(Command::FocusPane(5), "focus_pane_5", "Focus Pane 5", &["Cmd+5"], true),
 ];
 
 pub fn info_of(c: Command) -> &'static CommandInfo {
@@ -88,7 +95,9 @@ pub struct Chord {
 }
 
 impl Chord {
-    /// Parse `Ctrl+Shift+P`, `Alt+Z`, `Ctrl+\``, `Ctrl++`, `F5`.
+    /// Parse `Cmd+Shift+P`, `Alt+Z`, `Ctrl+\``, `Cmd++`, `F5`. `Cmd` is the
+    /// platform's main modifier (Ctrl except on macOS); `Ctrl` is the Control
+    /// key, which on other platforms is the same thing.
     pub fn parse(s: &str) -> Result<Self, String> {
         let s = s.trim();
         let (mods, key) = match s.strip_suffix("++") {
@@ -101,7 +110,7 @@ impl Chord {
         let mut c = Chord { cmd: false, ctrl: false, alt: false, shift: false, key };
         for m in mods.split('+').filter(|m| !m.is_empty()) {
             match m.to_ascii_lowercase().as_str() {
-                "ctrl" | "control" if MAC => c.ctrl = true,
+                "ctrl" | "control" if is_mac() => c.ctrl = true,
                 "ctrl" | "control" | "cmd" | "command" | "super" | "meta" => c.cmd = true,
                 "alt" | "option" => c.alt = true,
                 "shift" => c.shift = true,
@@ -112,7 +121,7 @@ impl Chord {
     }
 
     pub fn from_event(key: Key, m: Modifiers) -> Self {
-        Chord { cmd: m.command, ctrl: MAC && m.ctrl, alt: m.alt, shift: m.shift, key }
+        Chord { cmd: m.command, ctrl: is_mac() && m.ctrl, alt: m.alt, shift: m.shift, key }
     }
 
     pub fn matches(&self, key: Key, m: Modifiers) -> bool {
@@ -128,10 +137,10 @@ impl Chord {
             parts.push("Ctrl");
         }
         if self.cmd {
-            parts.push(if MAC { "Cmd" } else { "Ctrl" });
+            parts.push(if is_mac() { "Cmd" } else { "Ctrl" });
         }
         if self.alt {
-            parts.push(if MAC { "Option" } else { "Alt" });
+            parts.push(if is_mac() { "Option" } else { "Alt" });
         }
         if self.shift {
             parts.push("Shift");
@@ -305,11 +314,71 @@ impl Keybindings {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Lets a test act as macOS or not; each test runs on its own thread.
+        pub(crate) static MAC_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    fn on_platform(mac: bool) {
+        MAC_OVERRIDE.with(|m| m.set(Some(mac)));
+    }
+
+    /// Modifiers as the OS reports them for the main modifier key.
+    fn main_key(mac: bool) -> Modifiers {
+        if mac {
+            Modifiers { mac_cmd: true, command: true, ..Default::default() }
+        } else {
+            Modifiers { ctrl: true, command: true, ..Default::default() }
+        }
+    }
+
+    /// Modifiers for the physical Control key.
+    fn control_key(mac: bool) -> Modifiers {
+        if mac { Modifiers::CTRL } else { main_key(false) }
+    }
+
+    #[test]
+    fn mac_defaults_use_cmd() {
+        on_platform(true);
+        let kb = Keybindings::default();
+        assert_eq!(kb.lookup(Key::P, main_key(true)), Some(Command::QuickOpen));
+        assert_eq!(kb.lookup(Key::S, main_key(true)), Some(Command::Save));
+        assert_eq!(kb.lookup(Key::P, control_key(true)), None, "Control+P is not Go to File on macOS");
+        assert_eq!(kb.lookup(Key::Backtick, control_key(true)), Some(Command::ToggleTerminal));
+        assert_eq!(kb.lookup(Key::Backtick, main_key(true)), None, "Cmd+` is macOS's window switcher");
+        assert_eq!(kb.label(Command::QuickOpen), "Cmd+P");
+        assert_eq!(kb.label(Command::ToggleTerminal), "Ctrl+`");
+    }
+
+    #[test]
+    fn linux_and_windows_defaults_use_ctrl() {
+        on_platform(false);
+        let kb = Keybindings::default();
+        assert_eq!(kb.lookup(Key::P, main_key(false)), Some(Command::QuickOpen));
+        assert_eq!(kb.lookup(Key::Backtick, control_key(false)), Some(Command::ToggleTerminal));
+        assert_eq!(kb.label(Command::QuickOpen), "Ctrl+P");
+    }
+
+    #[test]
+    fn every_default_parses_on_both_platforms() {
+        for mac in [false, true] {
+            on_platform(mac);
+            for info in COMMANDS {
+                for d in info.defaults {
+                    let c = Chord::parse(d).unwrap();
+                    assert_eq!(Chord::parse(&c.label()).unwrap(), c, "{d} on mac={mac}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn parse_and_label() {
+        on_platform(false);
         let c = Chord::parse("Ctrl+Shift+P").unwrap();
         assert!(c.shift && c.key == Key::P);
         assert_eq!(Chord::parse("ctrl+p").unwrap().key, Key::P);
@@ -324,6 +393,7 @@ mod tests {
 
     #[test]
     fn defaults_cover_every_command() {
+        on_platform(false);
         let kb = Keybindings::default();
         assert_eq!(kb.lookup(Key::P, Modifiers::COMMAND), Some(Command::QuickOpen));
         assert_eq!(kb.lookup(Key::P, Modifiers::COMMAND | Modifiers::SHIFT), Some(Command::CommandLine));
@@ -334,6 +404,7 @@ mod tests {
 
     #[test]
     fn rebinding_steals_and_round_trips() {
+        on_platform(false);
         let mut kb = Keybindings::default();
         let taken = kb.set(Command::ToggleTerminal, Chord::parse("Ctrl+P").unwrap());
         assert_eq!(taken, vec!["Go to File"]);

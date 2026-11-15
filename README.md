@@ -69,6 +69,8 @@ The status bar badge shows the current mode: **NORMAL**, **INSERT**, **VISUAL** 
 | `:terminal` `:files` `:sidebar` `:keybindings` | app commands |
 | `:vsp [file]` `:only` | split pane (side by side) / close other panes |
 
+On macOS, use Cmd wherever this README says Ctrl, except for ``Ctrl+` `` (terminal) and `Ctrl+Tab`, which use the Control key as in VS Code.
+
 | App shortcuts | |
 |---|---|
 | `Ctrl+P` | go to file (fuzzy) |
