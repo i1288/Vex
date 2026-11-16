@@ -10,6 +10,7 @@ use eframe::egui::{
 
 use crate::buffer::{self, tab_size, Buffer, Pos};
 use crate::commands::{self, Command, Keybindings};
+use crate::diagnostics::{Checker, Grammar};
 use crate::explorer::{self, Explorer};
 use crate::keymap::{self, MapMode, Mapping, Origin};
 use crate::keys_panel::KeysPanel;
@@ -57,6 +58,8 @@ pub struct VexApp {
     /// Wheel movement not yet turned into whole scrollback lines.
     terminal_scroll: f32,
     logo: egui::TextureHandle,
+    /// Background syntax checker.
+    checker: Checker,
     keys: Keybindings,
     keys_panel: Option<KeysPanel>,
     settings_page: Option<SettingsPage>,
@@ -92,6 +95,10 @@ impl VexApp {
             terminal_focused: false,
             terminal_scroll: 0.0,
             logo,
+            checker: {
+                let ctx = cc.egui_ctx.clone();
+                Checker::new(move || ctx.request_repaint())
+            },
             keys: Keybindings::default(),
             keys_panel: None,
             settings_page: None,
@@ -472,6 +479,7 @@ impl VexApp {
         let buf = &mut self.ws.buffers[b];
         if let Some(p) = path {
             buf.path = Some(p);
+            buf.checked_version = None; // the language may have changed
         }
         if self.settings.trim_trailing_whitespace && buf.trim_trailing_whitespace() {
             buf.clamp_cursor(self.vim.mode == Mode::Insert);
@@ -582,6 +590,8 @@ impl VexApp {
                     "files" => Command::QuickOpen,
                     "sidebar" => Command::ToggleSidebar,
                     "settingsfile" => return self.open_settings(),
+                    "next-diagnostic" => return self.jump_diagnostic(true),
+                    "prev-diagnostic" => return self.jump_diagnostic(false),
                     _ => Command::Keybindings,
                 };
                 self.run_command(ctx, c);
@@ -643,6 +653,67 @@ impl VexApp {
         let phase = (idle - 0.5) % 1.0;
         ctx.request_repaint_after(std::time::Duration::from_secs_f64(0.5 - phase % 0.5 + 0.01));
         phase >= 0.5
+    }
+
+    /// Collect finished syntax checks, and send changed files to the checker
+    /// once typing pauses.
+    fn update_diagnostics(&mut self, ctx: &egui::Context) {
+        let results: Vec<_> = self.checker.results().collect();
+        if !self.settings.syntax_check {
+            for buf in &mut self.ws.buffers {
+                buf.diagnostics.clear();
+                buf.checked_version = None;
+            }
+            return;
+        }
+        for done in results {
+            // A result for an older version is stale; a newer check is on its way.
+            if let Some(buf) = self.ws.buffers.iter_mut().find(|b| b.id == done.id && b.version == done.version) {
+                buf.diagnostics = done.diagnostics;
+            }
+        }
+        const PAUSE: f64 = 0.15;
+        let idle = ctx.input(|i| i.time) - self.last_input;
+        let mut waiting = false;
+        for buf in &mut self.ws.buffers {
+            let Some(grammar) = Grammar::for_extension(&buf.extension()) else {
+                buf.diagnostics.clear();
+                continue;
+            };
+            if buf.checked_version == Some(buf.version) {
+                continue;
+            }
+            // A newly opened file is checked right away; edits wait for a pause.
+            if buf.checked_version.is_some() && idle < PAUSE {
+                waiting = true;
+                continue;
+            }
+            buf.checked_version = Some(buf.version);
+            self.checker.submit(buf.id, buf.version, grammar, buf.text());
+        }
+        if waiting {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(PAUSE - idle));
+        }
+    }
+
+    /// Move the cursor to the next (or previous) syntax error, wrapping around.
+    fn jump_diagnostic(&mut self, forward: bool) {
+        let Some(b) = self.ws.current() else { return };
+        let buf = &mut self.ws.buffers[b];
+        let cur = buf.cursor;
+        let target = if forward {
+            buf.diagnostics.iter().find(|d| d.start > cur).or(buf.diagnostics.first())
+        } else {
+            buf.diagnostics.iter().rev().find(|d| d.start < cur).or(buf.diagnostics.last())
+        };
+        let Some(start) = target.map(|d| d.start) else {
+            self.info("No syntax errors");
+            return;
+        };
+        buf.cursor = start;
+        buf.clamp_cursor(self.vim.mode == Mode::Insert);
+        buf.want_col = buf.visual_col(buf.cursor.line, buf.cursor.col);
+        self.follow_cursor = true;
     }
 
     /// Save files that have a name once typing pauses, if auto-save is on.
@@ -974,6 +1045,7 @@ impl VexApp {
                 (true, false) => p.text_ui,
                 _ => p.text_muted,
             };
+            let color = if b.diagnostics.is_empty() { color } else { p.error };
             let name = galley(ui.ctx(), b.name(), UI_SIZE, color);
             let w = 12.0 + 16.0 + 4.0 + name.size().x + 8.0 + 20.0 + 6.0;
             let r = Rect::from_min_size(pos2(x, bar.top()), vec2(w, bar.height()));
@@ -1110,6 +1182,38 @@ impl VexApp {
         if let Some(name) = self.ws.current_buf().map(|b| b.name()) {
             let r = painter.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, name, font.clone(), fg);
             x = r.right() + 14.0;
+        }
+        // Syntax errors: a count to click (next error), and the message for the cursor's line.
+        let (error_count, cursor_error) = match self.ws.current_buf() {
+            Some(b) => (
+                b.diagnostics.len(),
+                b.diagnostics
+                    .iter()
+                    .find(|d| d.contains(b.cursor))
+                    .or_else(|| b.diagnostics.iter().find(|d| d.start.line == b.cursor.line))
+                    .map(|d| d.message.clone()),
+            ),
+            None => (0, None),
+        };
+        if error_count > 0 {
+            let p = theme::p();
+            let count = galley(ui.ctx(), error_count.to_string(), 12.0, fg);
+            let r = Rect::from_min_size(pos2(x - 5.0, rect.top() + 2.0), vec2(count.size().x + 28.0, rect.height() - 4.0));
+            let resp = ui.interact(r, ui.scope_id().with("status-errors"), Sense::click());
+            if resp.hovered() {
+                painter.rect_filled(r, CornerRadius::same(3), p.list_hover);
+            }
+            let c = pos2(x + 6.0, rect.center().y);
+            painter.circle_stroke(c, 5.5, Stroke::new(1.3, p.error));
+            draw_x(painter, c, 2.3, p.error);
+            painter.galley(pos2(x + 16.0, rect.center().y - count.size().y / 2.0), count, fg);
+            x = r.right() + 12.0;
+            if resp.on_hover_text("Syntax errors: click, or ]d / [d, to go to the next one").clicked() {
+                self.jump_diagnostic(true);
+            }
+        }
+        if let (None, Some(msg)) = (&self.vim.message, cursor_error) {
+            painter.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, msg, font.clone(), theme::p().error);
         }
         if let Some(msg) = &self.vim.message {
             let error = self.vim.message_is_error;
@@ -1510,6 +1614,7 @@ impl eframe::App for VexApp {
         self.handle_input(&ctx);
         self.check_mapping_timeout(&ctx);
         self.auto_save(&ctx);
+        self.update_diagnostics(&ctx);
         self.handle_close_request(&ctx);
         self.update_title(&ctx);
 

@@ -37,6 +37,8 @@ pub struct Settings {
     pub render_whitespace: String,
     pub breadcrumbs: bool,
     pub scroll_off: usize,
+    /// Underline syntax errors as you type.
+    pub syntax_check: bool,
     // Keyboard
     /// Vim commands follow key positions (as on QWERTY), for other keyboard layouts.
     pub vim_key_positions: bool,
@@ -75,6 +77,7 @@ impl Default for Settings {
             render_whitespace: "none".into(),
             breadcrumbs: true,
             scroll_off: 4,
+            syntax_check: true,
             vim_key_positions: false,
             auto_save: false,
             auto_save_delay_ms: 1000,
@@ -200,6 +203,7 @@ impl Settings {
             ("Show spaces and tabs: none, boundary (leading/trailing) or all", format!("render_whitespace = {}", quote(&self.render_whitespace))),
             ("Show the file path above the editor", format!("breadcrumbs = {}", b(self.breadcrumbs))),
             ("Lines kept visible above and below the cursor", format!("scroll_off = {}", self.scroll_off)),
+            ("Underline syntax errors as you type (Rust, Python, JS/TS, C/C++, Go, Java, JSON, Bash, CSS, HTML, TOML, YAML)", format!("syntax_check = {}", b(self.syntax_check))),
         ];
         flush(&mut out, &mut lines);
         out.push_str("\n# ---- Keyboard ----\n");
@@ -301,6 +305,7 @@ impl Settings {
             "cursorline" | "cul" => &mut self.highlight_current_line,
             "cursorblink" => &mut self.cursor_blink,
             "breadcrumbs" => &mut self.breadcrumbs,
+            "syntaxcheck" => &mut self.syntax_check,
             "autosave" => &mut self.auto_save,
             "physicalkeys" | "pk" => &mut self.vim_key_positions,
             _ => return None,

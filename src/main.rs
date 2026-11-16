@@ -4,6 +4,7 @@
 mod app;
 mod buffer;
 mod commands;
+mod diagnostics;
 mod explorer;
 mod keymap;
 mod keys_panel;

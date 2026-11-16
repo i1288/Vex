@@ -58,6 +58,8 @@ pub struct Palette {
     pub list_selected: Color32,
     pub tree_guide: Color32,
     pub scrollbar: Color32,
+    /// Syntax error squiggles and counts.
+    pub error: Color32,
 
     pub keyword: Color32,
     pub control: Color32,
@@ -109,6 +111,7 @@ pub const DARK_MODERN: Palette = Palette {
     list_selected: hex(0x04395e),
     tree_guide: hex(0x3c3c3c),
     scrollbar: hex(0x797979),
+    error: hex(0xf14c4c),
     keyword: hex(0x569cd6),
     control: hex(0xc586c0),
     type_: hex(0x4ec9b0),
@@ -162,6 +165,7 @@ pub const LIGHT_MODERN: Palette = Palette {
     list_selected: hex(0xcce5ff),
     tree_guide: hex(0xd3d3d3),
     scrollbar: hex(0x646464),
+    error: hex(0xe51400),
     keyword: hex(0x0000ff),
     control: hex(0xaf00db),
     type_: hex(0x267f99),
@@ -216,6 +220,7 @@ pub const DARK_PLUS: Palette = Palette {
     list_selected: hex(0x04395e),
     tree_guide: hex(0x454545),
     scrollbar: hex(0x797979),
+    error: hex(0xf14c4c),
     keyword: hex(0x569cd6),
     control: hex(0xc586c0),
     type_: hex(0x4ec9b0),
@@ -270,6 +275,7 @@ pub const LIGHT_PLUS: Palette = Palette {
     list_selected: hex(0xcce5ff),
     tree_guide: hex(0xc8c8c8),
     scrollbar: hex(0x646464),
+    error: hex(0xe51400),
     keyword: hex(0x0000ff),
     control: hex(0xaf00db),
     type_: hex(0x267f99),
@@ -352,6 +358,7 @@ color_fields! {
     list_selected: "Selected list item",
     tree_guide: "Tree guides",
     scrollbar: "Scrollbar",
+    error: "Errors",
 }
 
 /// The few colors a built-in community theme is defined by; everything else
@@ -420,6 +427,7 @@ fn derive(s: &Spec) -> Palette {
         list_selected: hex(s.selection),
         tree_guide: mix(surface, fg, 0.15),
         scrollbar: hex(s.muted),
+        error: if s.dark { hex(0xf14c4c) } else { hex(0xe51400) },
         keyword,
         control,
         type_,

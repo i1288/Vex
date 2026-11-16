@@ -50,6 +50,7 @@ The status bar badge shows the current mode: **NORMAL**, **INSERT**, **VISUAL** 
 | `/ ?` `n N` `* #` | search (regex, smartcase) |
 | `v V` | visual / visual line |
 | `gt gT` | next / previous tab |
+| `]d` `[d` | next / previous syntax error |
 | `Ctrl-w h/l` `Ctrl-w w` | focus pane left / right / next |
 | `Ctrl-w v` `Ctrl-w q` `Ctrl-w o` | split / close / keep only this pane |
 | counts | `3dw`, `5j`, `2dd` … |
@@ -87,6 +88,17 @@ On macOS, use Cmd wherever this README says Ctrl, except for ``Ctrl+` `` (termin
 | ``Ctrl+` `` | show / focus / hide the terminal |
 
 Yanks are copied to the system clipboard, and `Ctrl+V` pastes from it. In the editor, `Ctrl+C` copies the selection in visual mode and acts as `Esc` otherwise.
+
+## Syntax checking
+
+Vex underlines syntax errors as you type in **Rust, Python, JavaScript, TypeScript/TSX, C, C++, Go, Java, JSON, Bash, CSS, HTML, TOML and YAML**. It uses [tree-sitter](https://tree-sitter.github.io/) grammars built into Vex, so nothing extra needs to be installed. Checking runs on a background thread a moment after you stop typing, and only for files that changed. A 9,000-line file takes about 20 ms.
+
+- A red squiggle marks each error. Hover over it, or put the cursor on its line, to read the message in the status bar.
+- The status bar shows the error count for the current file. Click it, or use `]d` / `[d`, to jump to the next or previous error.
+- Files with errors get a red tab name and red marks on the scrollbar.
+- Turn it off in Settings → Editor → Syntax checking, with `syntax_check = false`, or with `:set nosyntaxcheck`.
+
+It catches syntax mistakes: unclosed brackets, stray tokens, missing `;`, broken JSON. Type errors, such as a wrong argument type, need a language server.
 
 ## Other keyboard layouts (Colemak, Dvorak, AZERTY…)
 
@@ -168,6 +180,7 @@ src/
   vim.rs       modal editing engine (GUI-independent, unit tested)
   buffer.rs    text buffer, file I/O, undo/redo
   syntax.rs    keyword-based syntax highlighting
+  diagnostics.rs  tree-sitter syntax checking on a background thread
   explorer.rs  file tree and fuzzy file finder
   settings.rs  settings file and :set options
   settings_page.rs  the Settings page

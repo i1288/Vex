@@ -309,6 +309,11 @@ fn parse_simple(keys: &[Key], i: usize, count: Option<usize>) -> Parse<Cmd> {
                 Some(Key::Char('T')) => "gT",
                 _ => return Parse::Invalid,
             },
+            ']' | '[' => match keys.get(i + 1) {
+                None => return Parse::Incomplete,
+                Some(Key::Char('d')) => if *c == ']' { "]d" } else { "[d" },
+                _ => return Parse::Invalid,
+            },
             'Z' => match keys.get(i + 1) {
                 None => return Parse::Incomplete,
                 Some(Key::Char('Z')) => "ZZ",
@@ -932,7 +937,7 @@ impl Vim {
                     buf.lines[cur.line][c] = toggle_case(ch);
                 }
                 if end > cur.col {
-                    buf.dirty = true;
+                    buf.touch();
                 }
                 buf.cursor.col = end;
                 buf.clamp_cursor(false);
@@ -946,7 +951,7 @@ impl Vim {
                 for c in cur.col..cur.col + n {
                     buf.lines[cur.line][c] = ch;
                 }
-                buf.dirty = true;
+                buf.touch();
                 buf.cursor.col = cur.col + n - 1;
             }
             "n" | "N" => {
@@ -990,6 +995,8 @@ impl Vim {
                 self.replaying = false;
             }
             "C-w" => return arg.map(Action::Window),
+            "]d" => return Some(Action::App("next-diagnostic")),
+            "[d" => return Some(Action::App("prev-diagnostic")),
             "gt" => return Some(Action::NextTab),
             "gT" => return Some(Action::PrevTab),
             "ZZ" => return Some(Action::WriteQuit),
@@ -1307,7 +1314,7 @@ impl Vim {
                     let indent = buf.indent_of(a);
                     let len = indent.len();
                     buf.lines[a] = indent;
-                    buf.dirty = true;
+                    buf.touch();
                     self.mode = Mode::Insert;
                     buf.cursor = Pos::new(a, len);
                 }
@@ -1359,7 +1366,7 @@ impl Vim {
                             None => break,
                         }
                     }
-                    buf.dirty = true;
+                    buf.touch();
                     self.set_cursor(buf, a);
                 }
                 _ => {}
@@ -2215,6 +2222,8 @@ mod tests {
         assert_eq!(v.handle_key(&mut b, Key::Char('l')), Some(Action::Window('l')));
         v.handle_key(&mut b, Key::Ctrl('w'));
         assert_eq!(v.handle_key(&mut b, Key::Ctrl('w')), Some(Action::Window('w')));
+        assert_eq!(v.handle_key(&mut b, Key::Char(']')), None);
+        assert_eq!(v.handle_key(&mut b, Key::Char('d')), Some(Action::App("next-diagnostic")));
         feed(&mut b, &mut v, ":vsp src/a.rs");
         assert_eq!(v.handle_key(&mut b, Key::Enter), Some(Action::Split(Some("src/a.rs".into()))));
     }

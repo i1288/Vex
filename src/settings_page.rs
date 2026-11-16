@@ -362,6 +362,12 @@ fn editor(ui: &mut Ui, rows: &mut Rows, st: &mut Settings) -> bool {
             .collect();
         combo(ui, "whitespace", &mut st.render_whitespace, &options)
     });
+    changed |= rows.row(
+        ui,
+        "Syntax checking",
+        "Underline syntax errors as you type, for Rust, Python, JavaScript, TypeScript, C, C++, Go, Java, JSON, Bash, CSS, HTML, TOML and YAML. Jump between errors with ]d and [d.",
+        |ui| ui.checkbox(&mut st.syntax_check, "Check syntax").changed(),
+    );
     changed |= rows.row(ui, "Breadcrumbs", "Show the file's folder path above the editor.", |ui| ui.checkbox(&mut st.breadcrumbs, "Show breadcrumbs").changed());
     changed |= rows.row(ui, "Scroll margin", "Lines kept visible above and below the cursor when scrolling.", |ui| {
         ui.add(egui::DragValue::new(&mut st.scroll_off).range(0..=20).suffix(" lines")).changed()

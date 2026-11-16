@@ -306,6 +306,16 @@ impl View<'_> {
                 let gy = y + (line_h - g.size().y) / 2.0;
                 text_painter.galley(pos2(x_of(s), gy), g, p.text);
 
+                // Syntax errors: a red squiggle under each one on this row.
+                for d in buf.diagnostics.iter().filter(|d| d.start.line == l) {
+                    let a = d.start.col.min(len);
+                    let b = if d.end.line == l { d.end.col.min(len) } else { len }.max(a + 1);
+                    let (lo, hi) = (a.max(s), b.min(if last { len + 1 } else { e }));
+                    if lo < hi {
+                        squiggle(&text_painter, x_of(lo), x_of(hi), y + line_h - 2.5, p.error);
+                    }
+                }
+
                 // Visible whitespace: a dot per space, an arrow per tab.
                 if st.render_whitespace != "none" {
                     let first_text = line.iter().position(|c| !c.is_whitespace()).unwrap_or(len);
@@ -402,6 +412,15 @@ impl View<'_> {
             draw_minimap(ui, &painter, mm, id, buf, lang, visible, line_h, max_scroll, rows, &row_of_line);
         }
 
+        // Error marks along the right edge, like VS Code's overview ruler.
+        if !buf.diagnostics.is_empty() {
+            let x = rect.right() - 6.0;
+            for d in buf.diagnostics.iter().filter(|d| d.start.line < row_of_line.len() - 1) {
+                let y = rect.top() + row_of_line[d.start.line] as f32 / rows.max(1) as f32 * rect.height();
+                painter.rect_filled(Rect::from_min_size(pos2(x, y), vec2(5.0, 3.0)), 1.0, p.error);
+            }
+        }
+
         // Vertical scrollbar with a cursor marker, like VS Code's overview ruler.
         let total = max_scroll + rect.height();
         if total > rect.height() + 1.0 {
@@ -421,8 +440,36 @@ impl View<'_> {
             let my = rect.top() + cur_row as f32 / rows.max(1) as f32 * rect.height();
             painter.rect_filled(Rect::from_min_size(pos2(track.left(), my), vec2(SCROLLBAR_W, 2.0)), 0.0, p.cursor);
         }
+        // Hovering a squiggle shows its message.
+        if let Some(ptr) = resp.hover_pos().filter(|_| !buf.diagnostics.is_empty()) {
+            let r = (((ptr.y - rect.top() + scroll_y) / line_h).max(0.0) as usize).min(rows.saturating_sub(1));
+            let l = line_of_row(r);
+            let lay = LineLayout::new(buf, l, wrap_cols);
+            let x = ((ptr.x - text_x0 + scroll_x) / char_w).max(0.0) as usize;
+            let pos = Pos::new(l, lay.col_at((r - row_of_line[l]).min(lay.rows() - 1), x));
+            if let Some(d) = buf.diagnostics.iter().find(|d| d.contains(pos)) {
+                let msg = d.message.clone();
+                return resp.on_hover_ui_at_pointer(|ui| {
+                    ui.label(egui::RichText::new(msg).color(p.error));
+                });
+            }
+        }
         resp
     }
+}
+
+/// A wavy underline from `x0` to `x1` at `y`.
+fn squiggle(painter: &egui::Painter, x0: f32, x1: f32, y: f32, color: Color32) {
+    let mut points = Vec::new();
+    let mut x = x0;
+    let mut up = false;
+    while x < x1 {
+        points.push(pos2(x, if up { y - 2.0 } else { y + 1.0 }));
+        up = !up;
+        x += 2.0;
+    }
+    points.push(pos2(x1, if up { y - 2.0 } else { y + 1.0 }));
+    painter.add(egui::Shape::line(points, Stroke::new(1.2, color)));
 }
 
 /// The minimap: every line drawn as thin colored strokes, with a slider over

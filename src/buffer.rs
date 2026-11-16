@@ -3,8 +3,9 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static TAB_SIZE: AtomicUsize = AtomicUsize::new(4);
 static EXPAND_TAB: AtomicBool = AtomicBool::new(true);
 
@@ -58,6 +59,13 @@ pub struct Buffer {
     pub dirty: bool,
     /// The file used Windows (CRLF) line endings; saving keeps them.
     pub crlf: bool,
+    /// Unique for the life of the app; buffers move around, this doesn't.
+    pub id: u64,
+    /// Bumped on every edit, so background work can tell if it is stale.
+    pub version: u64,
+    /// Syntax errors from the last check, and the version that check was for.
+    pub diagnostics: Vec<crate::diagnostics::Diagnostic>,
+    pub checked_version: Option<u64>,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
 }
@@ -87,6 +95,10 @@ impl Buffer {
             scroll_x: 0.0,
             dirty: false,
             crlf: text.contains("\r\n"),
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            version: 0,
+            diagnostics: Vec::new(),
+            checked_version: None,
             undo: Vec::new(),
             redo: Vec::new(),
         }
@@ -232,9 +244,15 @@ impl Buffer {
 
     // ---- editing -------------------------------------------------------
 
+    /// Record that the text changed.
+    pub fn touch(&mut self) {
+        self.dirty = true;
+        self.version += 1;
+    }
+
     /// Insert `text` (may contain newlines) at `p`; returns the position after it.
     pub fn insert(&mut self, p: Pos, text: &str) -> Pos {
-        self.dirty = true;
+        self.touch();
         let mut parts = text.split('\n');
         let first: Vec<char> = parts.next().unwrap_or("").chars().collect();
         let col = p.col.min(self.line_len(p.line));
@@ -273,7 +291,7 @@ impl Buffer {
         if removed.is_empty() {
             return removed;
         }
-        self.dirty = true;
+        self.touch();
         let b_col = b.col.min(self.line_len(b.line));
         if a.line == b.line {
             self.lines[a.line].drain(a.col..b_col);
@@ -288,7 +306,7 @@ impl Buffer {
 
     /// Remove whole lines `a..=b`, keeping at least one line in the buffer.
     pub fn delete_lines(&mut self, a: usize, b: usize) -> String {
-        self.dirty = true;
+        self.touch();
         let removed: Vec<String> = self
             .lines
             .drain(a..=b)
@@ -301,7 +319,7 @@ impl Buffer {
     }
 
     pub fn insert_lines(&mut self, at: usize, text: &str) {
-        self.dirty = true;
+        self.touch();
         for (i, l) in text.split('\n').enumerate() {
             self.lines.insert(at + i, l.chars().collect());
         }
@@ -326,6 +344,7 @@ impl Buffer {
             let keep = line.iter().rposition(|c| !c.is_whitespace()).map_or(0, |i| i + 1);
             line.truncate(keep);
         }
+        self.touch();
         true
     }
 
@@ -350,7 +369,7 @@ impl Buffer {
             cursor: self.cursor,
         });
         self.cursor = s.cursor;
-        self.dirty = true;
+        self.touch();
         true
     }
 
@@ -361,7 +380,7 @@ impl Buffer {
             cursor: self.cursor,
         });
         self.cursor = s.cursor;
-        self.dirty = true;
+        self.touch();
         true
     }
 }
