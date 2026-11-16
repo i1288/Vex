@@ -120,9 +120,11 @@ fn parse_keys(s: &str) -> Vec<Event> {
                         Some(button(false))
                     }
                     n if n.starts_with("c-") || n.starts_with("cs-") => {
+                        // A real Ctrl press on Linux and Windows sets both `ctrl` and `command`.
+                        let ctrl = if cfg!(target_os = "macos") { Modifiers::COMMAND } else { Modifiers::COMMAND | Modifiers::CTRL };
                         let (mods, k) = match n.strip_prefix("cs-") {
-                            Some(k) => (Modifiers::COMMAND | Modifiers::SHIFT, k),
-                            None => (Modifiers::COMMAND, &n[2..]),
+                            Some(k) => (ctrl | Modifiers::SHIFT, k),
+                            None => (ctrl, &n[2..]),
                         };
                         Key::from_name(&k.to_uppercase()).map(|k| key_event(k, mods))
                     }

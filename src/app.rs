@@ -25,6 +25,8 @@ use crate::workspace::Workspace;
 use crate::vim::{Action, Key, Mode, Vim};
 
 const UI_SIZE: f32 = 13.0;
+const TAB_GAP: f32 = 3.0;
+const TAB_RADIUS: u8 = 7;
 
 struct QuickOpen {
     query: String,
@@ -991,70 +993,77 @@ impl VexApp {
 
     fn activity_bar(&mut self, ui: &mut Ui) {
         let rect = ui.max_rect();
-        let painter = ui.painter();
-        let icon = |i: usize| Rect::from_min_size(pos2(rect.left(), rect.top() + i as f32 * 48.0), vec2(48.0, 48.0));
+        let p = theme::p();
 
-        let r = icon(0);
-        let resp = ui.interact(r, ui.scope_id().with("act-explorer"), Sense::click());
-        let active = self.show_sidebar;
-        let color = if active || resp.hovered() { theme::p().activity_fg } else { theme::p().icon_inactive };
-        if active {
-            painter.rect_filled(Rect::from_min_size(r.min, vec2(2.0, 48.0)), 0.0, theme::p().accent);
-        }
-        draw_files_icon(painter, r.center(), color);
-        if resp.clicked() {
+        // The Vex logo in the top-left corner.
+        let logo_cell = Rect::from_min_size(rect.min, vec2(48.0, 50.0));
+        let logo = Rect::from_center_size(logo_cell.center(), vec2(26.0, 26.0));
+        ui.painter().image(self.logo.id(), logo, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        ui.interact(logo_cell, ui.scope_id().with("act-logo"), Sense::hover())
+            .on_hover_text(format!("Vex {}", env!("CARGO_PKG_VERSION")));
+
+        let item = |i: usize| Rect::from_min_size(pos2(rect.left(), logo_cell.bottom() + i as f32 * 46.0), vec2(48.0, 46.0));
+        let explorer = activity_item(ui, item(0), "act-explorer", self.show_sidebar, &p, draw_files_icon);
+        if explorer.clicked() {
             self.show_sidebar = !self.show_sidebar;
         }
-        resp.on_hover_text(format!("Explorer ({})", self.keys.label(Command::ToggleSidebar)));
+        explorer.on_hover_text(format!("Explorer ({})", self.keys.label(Command::ToggleSidebar)));
 
-        let r = icon(1);
-        let resp = ui.interact(r, ui.scope_id().with("act-search"), Sense::click());
-        let color = if self.quick_open.is_some() || resp.hovered() { theme::p().activity_fg } else { theme::p().icon_inactive };
-        draw_search_icon(painter, r.center(), color);
-        if resp.clicked() {
+        let search = activity_item(ui, item(1), "act-search", self.quick_open.is_some(), &p, draw_search_icon);
+        if search.clicked() {
             self.run_command(&ui.ctx().clone(), Command::QuickOpen);
         }
-        resp.on_hover_text(format!("Go to File ({})", self.keys.label(Command::QuickOpen)));
+        search.on_hover_text(format!("Go to File ({})", self.keys.label(Command::QuickOpen)));
 
         // Bottom: the gear, like VS Code's Manage button.
-        let r = Rect::from_min_size(pos2(rect.left(), rect.bottom() - 48.0), vec2(48.0, 48.0));
-        let resp = ui.interact(r, ui.scope_id().with("act-keys"), Sense::click());
-        let color = if self.settings_page.is_some() || resp.hovered() { theme::p().activity_fg } else { theme::p().icon_inactive };
-        draw_gear_icon(ui.painter(), r.center(), color);
-        if resp.clicked() {
+        let r = Rect::from_min_size(pos2(rect.left(), rect.bottom() - 50.0), vec2(48.0, 46.0));
+        let gear = activity_item(ui, r, "act-settings", self.settings_page.is_some(), &p, draw_gear_icon);
+        if gear.clicked() {
             if self.settings_page.is_some() {
                 self.settings_page = None;
             } else {
                 self.open_settings_page();
             }
         }
-        resp.on_hover_text(format!("Settings ({})", self.keys.label(Command::OpenSettings)));
+        gear.on_hover_text(format!("Settings ({})", self.keys.label(Command::OpenSettings)));
     }
 
     fn sidebar(&mut self, ui: &mut Ui) {
+        let p = theme::p();
         let w = ui.available_width();
         let (r, _) = ui.allocate_exact_size(vec2(w, 35.0), Sense::hover());
-        ui.painter().text(
-            r.left_center() + vec2(20.0, 0.0),
-            Align2::LEFT_CENTER,
-            "EXPLORER",
-            FontId::proportional(11.0),
-            theme::p().text_ui,
-        );
+        ui.painter().text(r.left_center() + vec2(20.0, 0.0), Align2::LEFT_CENTER, "EXPLORER", FontId::proportional(11.0), p.text_ui);
+        // Header actions, right-aligned.
+        let refresh = Rect::from_center_size(pos2(r.right() - 22.0, r.center().y), vec2(22.0, 22.0));
+        let collapse = Rect::from_center_size(pos2(r.right() - 48.0, r.center().y), vec2(22.0, 22.0));
+        for (rect, id, tip, draw) in [
+            (refresh, "explorer-refresh", "Refresh", draw_refresh_icon as fn(&Painter, egui::Pos2, Color32)),
+            (collapse, "explorer-collapse", "Collapse Folders", draw_collapse_icon),
+        ] {
+            let resp = ui.interact(rect, ui.scope_id().with(id), Sense::click());
+            if resp.hovered() {
+                ui.painter().rect_filled(rect, CornerRadius::same(5), p.list_hover);
+            }
+            draw(ui.painter(), rect.center(), if resp.hovered() { p.text_bright } else { p.text_muted });
+            if resp.on_hover_text(tip).clicked() {
+                if id == "explorer-refresh" {
+                    self.explorer.refresh();
+                } else {
+                    self.explorer.collapse_all();
+                }
+            }
+        }
 
-        let (r, resp) = ui.allocate_exact_size(vec2(w, 22.0), Sense::click());
+        let (r, _) = ui.allocate_exact_size(vec2(w, 24.0), Sense::hover());
         let painter = ui.painter();
-        draw_chevron(painter, pos2(r.left() + 12.0, r.center().y), true, theme::p().text_ui);
+        draw_chevron(painter, pos2(r.left() + 12.0, r.center().y), true, p.text_ui);
         painter.text(
             r.left_center() + vec2(22.0, 0.0),
             Align2::LEFT_CENTER,
             self.explorer.root_name().to_uppercase(),
             FontId::proportional(11.0),
-            theme::p().text_ui,
+            p.text_bright,
         );
-        if resp.on_hover_text("Click to refresh").clicked() {
-            self.explorer.refresh();
-        }
 
         let active_path = self.ws.current_buf().and_then(|b| b.path.clone());
         let mut clicked: Option<(PathBuf, bool)> = None;
@@ -1064,29 +1073,28 @@ impl VexApp {
                 let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
                 let painter = ui.painter();
                 let is_active = active_path.as_ref() == Some(&row.entry.path);
+                // Rounded, inset highlights.
+                let hl = r.shrink2(vec2(6.0, 0.5));
                 if is_active {
-                    painter.rect_filled(r, 0.0, theme::p().list_active);
+                    painter.rect_filled(hl, CornerRadius::same(5), p.list_active);
                 } else if resp.hovered() {
-                    painter.rect_filled(r, 0.0, theme::p().list_hover);
+                    painter.rect_filled(hl, CornerRadius::same(5), p.list_hover);
                 }
-                let x = r.left() + 8.0 + row.depth as f32 * 12.0;
+                let x = r.left() + 10.0 + row.depth as f32 * 12.0;
                 // Indent guides, like VS Code's tree.
                 for d in 0..row.depth {
-                    let gx = r.left() + 8.0 + d as f32 * 12.0 + 7.0;
-                    painter.line_segment([pos2(gx, r.top()), pos2(gx, r.bottom())], Stroke::new(1.0, theme::p().tree_guide));
+                    let gx = r.left() + 10.0 + d as f32 * 12.0 + 7.0;
+                    painter.line_segment([pos2(gx, r.top()), pos2(gx, r.bottom())], Stroke::new(1.0, p.tree_guide));
                 }
+                // Folders: chevron and folder icon. Files line up with folder icons.
                 if row.entry.is_dir {
-                    draw_chevron(painter, pos2(x + 7.0, r.center().y), row.expanded, theme::p().text_ui);
+                    draw_chevron(painter, pos2(x + 7.0, r.center().y), row.expanded, p.text_muted);
+                    draw_folder_icon(painter, pos2(x + 23.0, r.center().y), row.expanded);
                 } else {
-                    draw_file_icon(painter, pos2(x + 8.0, r.center().y), theme::file_color(&row.entry.name));
+                    draw_file_icon(painter, pos2(x + 23.0, r.center().y), theme::file_color(&row.entry.name));
                 }
-                painter.text(
-                    pos2(x + 20.0, r.center().y),
-                    Align2::LEFT_CENTER,
-                    &row.entry.name,
-                    FontId::proportional(UI_SIZE),
-                    theme::p().text_ui,
-                );
+                let color = if is_active { p.text_bright } else { p.text_ui };
+                painter.text(pos2(x + 35.0, r.center().y), Align2::LEFT_CENTER, &row.entry.name, FontId::proportional(UI_SIZE), color);
                 if resp.clicked() {
                     clicked = Some((row.entry.path.clone(), row.entry.is_dir));
                 }
@@ -1125,16 +1133,25 @@ impl VexApp {
             };
             let name = galley(ui.ctx(), b.name(), UI_SIZE, color);
             let w = 12.0 + 16.0 + 4.0 + name.size().x + 8.0 + 20.0 + 6.0;
-            let r = Rect::from_min_size(pos2(x, bar.top()), vec2(w, bar.height()));
+            // Tabs float a little below the bar's top edge, rounded at the top;
+            // the active one joins the editor below it.
+            let r = Rect::from_min_size(pos2(x + TAB_GAP, bar.top() + 5.0), vec2(w, bar.height() - 5.0));
             let resp = ui.interact(r, ui.scope_id().with(("tab", group, i)), Sense::click());
-            painter.rect_filled(r, 0.0, if active { p.editor_bg } else { p.tab_inactive });
-            painter.line_segment([r.right_top(), r.right_bottom()], Stroke::new(1.0, p.separator));
+            let top_round = CornerRadius { nw: TAB_RADIUS, ne: TAB_RADIUS, sw: 0, se: 0 };
             if active {
-                active_span = Some((r.left(), r.right()));
                 if focused_group {
-                    let top = Rect::from_min_size(r.min, vec2(r.width(), 2.0));
-                    painter.rect_filled(top, 0.0, p.accent);
+                    // The accent hugs the rounded top: the tab drawn in accent,
+                    // then again 2px lower in the editor color.
+                    painter.rect_filled(r, top_round, p.accent);
+                    painter.rect_filled(Rect::from_min_max(r.min + vec2(0.0, 2.0), r.max), top_round, p.editor_bg);
+                } else {
+                    painter.rect_filled(r, top_round, p.editor_bg);
                 }
+                active_span = Some((r.left(), r.right()));
+            } else if resp.hovered() {
+                painter.rect_filled(r.shrink2(vec2(0.0, 0.5)), top_round, p.list_hover);
+            } else if p.tab_inactive != p.tabs_bg {
+                painter.rect_filled(r, top_round, p.tab_inactive);
             }
             draw_file_icon(&painter, pos2(r.left() + 20.0, r.center().y), theme::file_color(&b.name()));
             painter.galley(pos2(r.left() + 32.0, r.center().y - name.size().y / 2.0), name, p.text_ui);
@@ -1154,7 +1171,7 @@ impl VexApp {
             } else if resp.clicked() {
                 action = Some((i, false));
             }
-            x += w;
+            x += w + TAB_GAP;
         }
         // The bottom border runs under every tab but the active one, which joins the editor.
         let y = bar.bottom() - 0.5;
@@ -1316,31 +1333,65 @@ impl VexApp {
         }
 
         // Right: cursor position and file info.
+        // Items that do something when clicked get a rounded hover highlight.
+        #[derive(Clone, Copy)]
+        enum Click {
+            None,
+            GoToLine,
+            EditorSettings,
+        }
         let buf = self.ws.current_buf();
-        let mut items: Vec<String> = Vec::new();
+        let mut items: Vec<(String, Click, &str)> = Vec::new();
         if let Some(b) = buf {
-            items.push(syntax::language_name(&b.extension()).to_string());
-            items.push(if b.crlf { "CRLF" } else { "LF" }.into());
-            items.push("UTF-8".into());
-            items.push(if buffer::expand_tab() { format!("Spaces: {}", tab_size()) } else { format!("Tab Size: {}", tab_size()) });
+            items.push((syntax::language_name(&b.extension()).to_string(), Click::None, ""));
+            items.push((if b.crlf { "CRLF" } else { "LF" }.into(), Click::None, ""));
+            items.push(("UTF-8".into(), Click::None, ""));
+            let indent = if buffer::expand_tab() { format!("Spaces: {}", tab_size()) } else { format!("Tab Size: {}", tab_size()) };
+            items.push((indent, Click::EditorSettings, "Indentation settings"));
             match self.vim.selection(b) {
-                Some((a, e)) if mode == Mode::VisualLine => items.push(format!("{} lines", e.line - a.line + 1)),
-                Some((a, e)) => items.push(format!("({} selected)", b.slice(a, e).chars().count() + 1)),
+                Some((a, e)) if mode == Mode::VisualLine => items.push((format!("{} lines", e.line - a.line + 1), Click::None, "")),
+                Some((a, e)) => items.push((format!("({} selected)", b.slice(a, e).chars().count() + 1), Click::None, "")),
                 None => {}
             }
-            items.push(format!("Ln {}, Col {}", b.cursor.line + 1, b.visual_col(b.cursor.line, b.cursor.col) + 1));
+            let pos = format!("Ln {}, Col {}", b.cursor.line + 1, b.visual_col(b.cursor.line, b.cursor.col) + 1);
+            items.push((pos, Click::GoToLine, "Go to line (type a number)"));
         }
         if let Some((server, text)) = self.lsp_progress.iter().next() {
-            items.push(format!("{server}: {text}"));
+            items.push((format!("{server}: {text}"), Click::None, ""));
         }
         let pending = self.vim.pending_keys();
         if !pending.is_empty() {
-            items.push(pending);
+            items.push((pending, Click::None, ""));
         }
         let mut rx = rect.right() - 10.0;
-        for item in items {
-            let r = painter.text(pos2(rx, rect.center().y), Align2::RIGHT_CENTER, item, font.clone(), fg);
-            rx = r.left() - 18.0;
+        let mut clicked = Click::None;
+        for (i, (item, action, tip)) in items.into_iter().enumerate() {
+            let g = galley(ui.ctx(), item, 12.0, fg);
+            let r = Rect::from_min_max(pos2(rx - g.size().x - 6.0, rect.top() + 2.0), pos2(rx + 6.0, rect.bottom() - 2.0));
+            if !matches!(action, Click::None) {
+                let resp = ui.interact(r, ui.scope_id().with(("status-item", i)), Sense::click());
+                if resp.hovered() {
+                    painter.rect_filled(r, CornerRadius::same(4), theme::p().list_hover);
+                }
+                if resp.on_hover_text(tip).clicked() {
+                    clicked = action;
+                }
+            }
+            painter.galley(pos2(rx - g.size().x, rect.center().y - g.size().y / 2.0), g, fg);
+            rx = r.left() - 12.0;
+        }
+        match clicked {
+            Click::GoToLine => {
+                self.vim.mode = Mode::Command;
+                self.vim.cmdline.clear();
+            }
+            Click::EditorSettings => {
+                self.open_settings_page();
+                if let Some(page) = &mut self.settings_page {
+                    page.show_section("Editor");
+                }
+            }
+            Click::None => {}
         }
     }
 
@@ -1429,10 +1480,8 @@ impl VexApp {
             FontId::proportional(11.0),
             p.text_bright,
         );
-        painter.line_segment(
-            [pos2(title.left(), header.bottom() - 6.0), pos2(title.right(), header.bottom() - 6.0)],
-            Stroke::new(1.0, if self.terminal_focused { p.accent } else { p.text_muted }),
-        );
+        let underline = Rect::from_min_max(pos2(title.left(), title.bottom() + 5.0), pos2(title.right(), title.bottom() + 7.0));
+        painter.rect_filled(underline, CornerRadius::same(1), if self.terminal_focused { p.accent } else { p.text_muted });
         if let Some(t) = &self.terminal {
             painter.text(pos2(title.right() + 16.0, header.center().y), Align2::LEFT_CENTER, &t.name, FontId::proportional(12.0), p.text_muted);
         }
@@ -1460,7 +1509,7 @@ impl VexApp {
         }
 
         // Screen grid.
-        let body = Rect::from_min_max(pos2(rect.left() + 20.0, header.bottom()), pos2(rect.right() - 14.0, rect.bottom() - 4.0));
+        let body = Rect::from_min_max(pos2(rect.left() + 20.0, header.bottom() + 4.0), pos2(rect.right() - 14.0, rect.bottom() - 4.0));
         let size = if self.settings.terminal_font_size > 0.0 { self.settings.terminal_font_size } else { self.settings.font_size };
         let font = FontId::monospace(size);
         let char_w = ui.ctx().fonts_mut(|f| f.glyph_width(&font, 'M'));
@@ -1633,9 +1682,9 @@ impl VexApp {
                 let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
                 let painter = ui.painter();
                 if i == qo.selected {
-                    painter.rect_filled(r, CornerRadius::same(3), theme::p().list_selected);
+                    painter.rect_filled(r, CornerRadius::same(5), theme::p().list_selected);
                 } else if resp.hovered() {
-                    painter.rect_filled(r, CornerRadius::same(3), theme::p().list_hover);
+                    painter.rect_filled(r, CornerRadius::same(5), theme::p().list_hover);
                 }
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 draw_file_icon(painter, pos2(r.left() + 14.0, r.center().y), theme::file_color(&name));
@@ -1809,7 +1858,7 @@ fn draw_chevron(p: &Painter, c: egui::Pos2, down: bool, color: Color32) {
 }
 
 fn draw_x(p: &Painter, c: egui::Pos2, s: f32, color: Color32) {
-    let st = Stroke::new(1.3, color);
+    let st = Stroke::new(1.2, color);
     p.line_segment([pos2(c.x - s, c.y - s), pos2(c.x + s, c.y + s)], st);
     p.line_segment([pos2(c.x + s, c.y - s), pos2(c.x - s, c.y + s)], st);
 }
@@ -1859,6 +1908,92 @@ fn draw_gear_icon(p: &Painter, c: egui::Pos2, color: Color32) {
     }
 }
 
+/// An activity-bar button: a rounded hover background, and a pill-shaped
+/// accent marker on the left when active.
+fn activity_item(
+    ui: &Ui,
+    r: Rect,
+    id: &str,
+    active: bool,
+    p: &theme::Palette,
+    draw: fn(&Painter, egui::Pos2, Color32),
+) -> egui::Response {
+    let resp = ui.interact(r, ui.scope_id().with(id), Sense::click());
+    let painter = ui.painter();
+    if resp.hovered() {
+        painter.rect_filled(r.shrink2(vec2(6.0, 4.0)), CornerRadius::same(8), p.list_hover);
+    }
+    if active {
+        let marker = Rect::from_center_size(pos2(r.left() + 1.5, r.center().y), vec2(3.0, 22.0));
+        painter.rect_filled(marker, CornerRadius::same(2), p.accent);
+    }
+    let color = if active || resp.hovered() { p.activity_fg } else { p.icon_inactive };
+    draw(painter, r.center(), color);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A folder, open or closed, in a warm folder color.
+fn draw_folder_icon(p: &Painter, c: egui::Pos2, open: bool) {
+    let color = Color32::from_rgb(0xdc, 0xb6, 0x7a);
+    let (w, h) = (14.0, 10.5);
+    let body = Rect::from_center_size(c + vec2(0.0, 0.5), vec2(w, h));
+    // The tab on top.
+    let tab = Rect::from_min_size(body.min - vec2(0.0, 2.0), vec2(6.0, 3.0));
+    p.rect_filled(tab, CornerRadius { nw: 2, ne: 2, sw: 0, se: 0 }, color);
+    if open {
+        p.rect_filled(body, CornerRadius::same(2), color.gamma_multiply(0.55));
+        let lid = vec![
+            pos2(body.left() + 2.5, body.top() + 3.0),
+            pos2(body.right() + 1.0, body.top() + 3.0),
+            pos2(body.right() - 1.5, body.bottom()),
+            pos2(body.left(), body.bottom()),
+        ];
+        p.add(Shape::convex_polygon(lid, color, Stroke::NONE));
+    } else {
+        p.rect_filled(body, CornerRadius::same(2), color);
+    }
+}
+
+/// A circular arrow: an open ring with an arrowhead at its upper-right end.
+fn draw_refresh_icon(p: &Painter, c: egui::Pos2, color: Color32) {
+    let r = 5.5;
+    // From just right of the top, counterclockwise most of the way round.
+    let (start, sweep) = (-1.15_f32, -4.9_f32);
+    let points: Vec<egui::Pos2> = (0..=24)
+        .map(|i| {
+            let a = start + sweep * i as f32 / 24.0;
+            pos2(c.x + r * a.cos(), c.y + r * a.sin())
+        })
+        .collect();
+    p.add(Shape::line(points, Stroke::new(1.3, color)));
+    // The head points along the ring at the start, clockwise.
+    let tip = pos2(c.x + r * start.cos(), c.y + r * start.sin());
+    let along = vec2(-start.sin(), start.cos());
+    let out = vec2(start.cos(), start.sin());
+    let head = tip + along * 1.5;
+    p.add(Shape::convex_polygon(
+        vec![head, head - along * 4.0 + out * 2.6, head - along * 4.0 - out * 2.6],
+        color,
+        Stroke::NONE,
+    ));
+}
+
+/// Two stacked squares, the front one with a minus: collapse all.
+fn draw_collapse_icon(p: &Painter, c: egui::Pos2, color: Color32) {
+    let st = Stroke::new(1.1, color);
+    // On the pixel grid, so the thin lines stay crisp.
+    let front = Rect::from_min_size(pos2((c.x - 6.0).round() + 0.5, (c.y - 3.0).round() + 0.5), vec2(9.0, 9.0));
+    p.rect_stroke(front, CornerRadius::same(2), st, egui::StrokeKind::Middle);
+    // The square behind shows as an L above and to the right.
+    let back = vec![
+        pos2(front.left() + 3.0, front.top() - 3.0),
+        pos2(front.right() + 3.0, front.top() - 3.0),
+        pos2(front.right() + 3.0, front.bottom() - 3.0),
+    ];
+    p.add(Shape::line(back, st));
+    p.line_segment([pos2(front.left() + 2.5, front.center().y), pos2(front.right() - 2.5, front.center().y)], st);
+}
+
 fn draw_split_icon(p: &Painter, c: egui::Pos2, color: Color32) {
     let r = Rect::from_center_size(c, vec2(14.0, 12.0));
     p.rect_stroke(r, 1.5, Stroke::new(1.2, color), egui::StrokeKind::Inside);
@@ -1884,9 +2019,18 @@ fn draw_search_icon(p: &Painter, c: egui::Pos2, color: Color32) {
 
 fn draw_welcome(p: &Painter, rect: Rect, logo: &egui::TextureHandle, keys: &Keybindings) {
     let c = rect.center();
-    let logo_rect = Rect::from_center_size(pos2(c.x, c.y - 130.0), vec2(112.0, 112.0));
+    let pal = theme::p();
+    let logo_rect = Rect::from_center_size(pos2(c.x, c.y - 150.0), vec2(104.0, 104.0));
     let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
     p.image(logo.id(), logo_rect, uv, Color32::WHITE);
+    p.text(pos2(c.x, logo_rect.bottom() + 22.0), Align2::CENTER_CENTER, "Vex", FontId::proportional(24.0), pal.text_bright);
+    p.text(
+        pos2(c.x, logo_rect.bottom() + 44.0),
+        Align2::CENTER_CENTER,
+        format!("version {}", env!("CARGO_PKG_VERSION")),
+        FontId::proportional(12.0),
+        pal.text_muted,
+    );
     let rows = [
         ("Go to File", keys.label(Command::QuickOpen)),
         ("Command Line", ":".into()),
@@ -1897,8 +2041,27 @@ fn draw_welcome(p: &Painter, rect: Rect, logo: &egui::TextureHandle, keys: &Keyb
         ("Save", format!(":w  /  {}", keys.label(Command::Save))),
     ];
     for (i, (label, keys)) in rows.iter().enumerate() {
-        let y = c.y - 30.0 + i as f32 * 26.0;
-        p.text(pos2(c.x - 10.0, y), Align2::RIGHT_CENTER, *label, FontId::proportional(13.0), theme::p().text_muted);
-        p.text(pos2(c.x + 10.0, y), Align2::LEFT_CENTER, keys, FontId::monospace(12.5), theme::p().text_ui);
+        let y = c.y + 4.0 + i as f32 * 30.0;
+        p.text(pos2(c.x - 12.0, y), Align2::RIGHT_CENTER, *label, FontId::proportional(13.0), pal.text_muted);
+        // Each key combination as keycaps: "Ctrl+P" → [Ctrl] [P].
+        let mut x = c.x + 12.0;
+        for (j, part) in keys.split("  /  ").enumerate() {
+            if j > 0 {
+                let r = p.text(pos2(x, y), Align2::LEFT_CENTER, "or", FontId::proportional(12.0), pal.text_muted);
+                x = r.right() + 8.0;
+            }
+            let caps: Vec<&str> = if part.len() > 1 && part.contains('+') && !part.ends_with('+') { part.split('+').collect() } else { vec![part] };
+            for cap in caps {
+                let g = p.layout_no_wrap(cap.to_string(), FontId::monospace(12.0), pal.text_ui);
+                let chip = Rect::from_min_size(pos2(x, y - 10.0), vec2(g.size().x + 12.0, 20.0));
+                p.rect_filled(chip, CornerRadius::same(4), pal.input_bg);
+                p.rect_stroke(chip, CornerRadius::same(4), Stroke::new(1.0, pal.border), egui::StrokeKind::Inside);
+                // A slightly darker bottom edge, like a key.
+                p.line_segment([chip.left_bottom() + vec2(3.0, -0.5), chip.right_bottom() + vec2(-3.0, -0.5)], Stroke::new(1.5, pal.border));
+                p.galley(pos2(chip.left() + 6.0, y - g.size().y / 2.0), g, pal.text_ui);
+                x = chip.right() + 4.0;
+            }
+            x += 4.0;
+        }
     }
 }
