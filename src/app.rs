@@ -25,6 +25,8 @@ use crate::workspace::Workspace;
 use crate::vim::{Action, Key, Mode, Vim};
 
 const UI_SIZE: f32 = 13.0;
+const TAB_GAP: f32 = 3.0;
+const TAB_RADIUS: u8 = 7;
 
 struct QuickOpen {
     query: String,
@@ -1133,18 +1135,21 @@ impl VexApp {
             let w = 12.0 + 16.0 + 4.0 + name.size().x + 8.0 + 20.0 + 6.0;
             // Tabs float a little below the bar's top edge, rounded at the top;
             // the active one joins the editor below it.
-            let r = Rect::from_min_size(pos2(x + 2.0, bar.top() + 5.0), vec2(w, bar.height() - 5.0));
+            let r = Rect::from_min_size(pos2(x + TAB_GAP, bar.top() + 5.0), vec2(w, bar.height() - 5.0));
             let resp = ui.interact(r, ui.scope_id().with(("tab", group, i)), Sense::click());
-            let top_round = CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 };
+            let top_round = CornerRadius { nw: TAB_RADIUS, ne: TAB_RADIUS, sw: 0, se: 0 };
             if active {
-                painter.rect_filled(r, top_round, p.editor_bg);
-                active_span = Some((r.left(), r.right()));
                 if focused_group {
-                    let line = Rect::from_min_max(pos2(r.left() + 7.0, r.top()), pos2(r.right() - 7.0, r.top() + 2.0));
-                    painter.rect_filled(line, CornerRadius::same(1), p.accent);
+                    // The accent hugs the rounded top: the tab drawn in accent,
+                    // then again 2px lower in the editor color.
+                    painter.rect_filled(r, top_round, p.accent);
+                    painter.rect_filled(Rect::from_min_max(r.min + vec2(0.0, 2.0), r.max), top_round, p.editor_bg);
+                } else {
+                    painter.rect_filled(r, top_round, p.editor_bg);
                 }
+                active_span = Some((r.left(), r.right()));
             } else if resp.hovered() {
-                painter.rect_filled(r.shrink2(vec2(0.0, 3.0)).translate(vec2(0.0, -2.0)), CornerRadius::same(6), p.list_hover);
+                painter.rect_filled(r.shrink2(vec2(0.0, 0.5)), top_round, p.list_hover);
             } else if p.tab_inactive != p.tabs_bg {
                 painter.rect_filled(r, top_round, p.tab_inactive);
             }
@@ -1166,7 +1171,7 @@ impl VexApp {
             } else if resp.clicked() {
                 action = Some((i, false));
             }
-            x += w + 2.0;
+            x += w + TAB_GAP;
         }
         // The bottom border runs under every tab but the active one, which joins the editor.
         let y = bar.bottom() - 0.5;
@@ -1475,10 +1480,8 @@ impl VexApp {
             FontId::proportional(11.0),
             p.text_bright,
         );
-        painter.line_segment(
-            [pos2(title.left(), header.bottom() - 6.0), pos2(title.right(), header.bottom() - 6.0)],
-            Stroke::new(1.0, if self.terminal_focused { p.accent } else { p.text_muted }),
-        );
+        let underline = Rect::from_min_max(pos2(title.left(), title.bottom() + 5.0), pos2(title.right(), title.bottom() + 7.0));
+        painter.rect_filled(underline, CornerRadius::same(1), if self.terminal_focused { p.accent } else { p.text_muted });
         if let Some(t) = &self.terminal {
             painter.text(pos2(title.right() + 16.0, header.center().y), Align2::LEFT_CENTER, &t.name, FontId::proportional(12.0), p.text_muted);
         }
@@ -1506,7 +1509,7 @@ impl VexApp {
         }
 
         // Screen grid.
-        let body = Rect::from_min_max(pos2(rect.left() + 20.0, header.bottom()), pos2(rect.right() - 14.0, rect.bottom() - 4.0));
+        let body = Rect::from_min_max(pos2(rect.left() + 20.0, header.bottom() + 4.0), pos2(rect.right() - 14.0, rect.bottom() - 4.0));
         let size = if self.settings.terminal_font_size > 0.0 { self.settings.terminal_font_size } else { self.settings.font_size };
         let font = FontId::monospace(size);
         let char_w = ui.ctx().fonts_mut(|f| f.glyph_width(&font, 'M'));
@@ -1679,9 +1682,9 @@ impl VexApp {
                 let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
                 let painter = ui.painter();
                 if i == qo.selected {
-                    painter.rect_filled(r, CornerRadius::same(3), theme::p().list_selected);
+                    painter.rect_filled(r, CornerRadius::same(5), theme::p().list_selected);
                 } else if resp.hovered() {
-                    painter.rect_filled(r, CornerRadius::same(3), theme::p().list_hover);
+                    painter.rect_filled(r, CornerRadius::same(5), theme::p().list_hover);
                 }
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 draw_file_icon(painter, pos2(r.left() + 14.0, r.center().y), theme::file_color(&name));
@@ -1855,7 +1858,7 @@ fn draw_chevron(p: &Painter, c: egui::Pos2, down: bool, color: Color32) {
 }
 
 fn draw_x(p: &Painter, c: egui::Pos2, s: f32, color: Color32) {
-    let st = Stroke::new(1.3, color);
+    let st = Stroke::new(1.2, color);
     p.line_segment([pos2(c.x - s, c.y - s), pos2(c.x + s, c.y + s)], st);
     p.line_segment([pos2(c.x + s, c.y - s), pos2(c.x - s, c.y + s)], st);
 }
@@ -1951,29 +1954,44 @@ fn draw_folder_icon(p: &Painter, c: egui::Pos2, open: bool) {
     }
 }
 
-/// A circular arrow.
+/// A circular arrow: an open ring with an arrowhead at its upper-right end.
 fn draw_refresh_icon(p: &Painter, c: egui::Pos2, color: Color32) {
     let r = 5.5;
-    let points: Vec<egui::Pos2> = (0..=20)
+    // From just right of the top, counterclockwise most of the way round.
+    let (start, sweep) = (-1.15_f32, -4.9_f32);
+    let points: Vec<egui::Pos2> = (0..=24)
         .map(|i| {
-            let a = -0.9 + i as f32 / 20.0 * 5.0;
+            let a = start + sweep * i as f32 / 24.0;
             pos2(c.x + r * a.cos(), c.y + r * a.sin())
         })
         .collect();
-    let end = *points.last().unwrap();
     p.add(Shape::line(points, Stroke::new(1.3, color)));
+    // The head points along the ring at the start, clockwise.
+    let tip = pos2(c.x + r * start.cos(), c.y + r * start.sin());
+    let along = vec2(-start.sin(), start.cos());
+    let out = vec2(start.cos(), start.sin());
+    let head = tip + along * 1.5;
     p.add(Shape::convex_polygon(
-        vec![end + vec2(-3.0, -1.5), end + vec2(2.5, -2.5), end + vec2(0.5, 2.5)],
+        vec![head, head - along * 4.0 + out * 2.6, head - along * 4.0 - out * 2.6],
         color,
         Stroke::NONE,
     ));
 }
 
-/// A rounded square with a minus: collapse all.
+/// Two stacked squares, the front one with a minus: collapse all.
 fn draw_collapse_icon(p: &Painter, c: egui::Pos2, color: Color32) {
-    let r = Rect::from_center_size(c, vec2(12.0, 12.0));
-    p.rect_stroke(r, CornerRadius::same(3), Stroke::new(1.2, color), egui::StrokeKind::Inside);
-    p.line_segment([pos2(c.x - 3.0, c.y), pos2(c.x + 3.0, c.y)], Stroke::new(1.3, color));
+    let st = Stroke::new(1.1, color);
+    // On the pixel grid, so the thin lines stay crisp.
+    let front = Rect::from_min_size(pos2((c.x - 6.0).round() + 0.5, (c.y - 3.0).round() + 0.5), vec2(9.0, 9.0));
+    p.rect_stroke(front, CornerRadius::same(2), st, egui::StrokeKind::Middle);
+    // The square behind shows as an L above and to the right.
+    let back = vec![
+        pos2(front.left() + 3.0, front.top() - 3.0),
+        pos2(front.right() + 3.0, front.top() - 3.0),
+        pos2(front.right() + 3.0, front.bottom() - 3.0),
+    ];
+    p.add(Shape::line(back, st));
+    p.line_segment([pos2(front.left() + 2.5, front.center().y), pos2(front.right() - 2.5, front.center().y)], st);
 }
 
 fn draw_split_icon(p: &Painter, c: egui::Pos2, color: Color32) {

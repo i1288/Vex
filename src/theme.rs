@@ -701,6 +701,9 @@ pub fn apply_visuals(ctx: &egui::Context) {
     }
     v.widgets.inactive.weak_bg_fill = p.input_bg;
     v.widgets.inactive.bg_fill = p.input_bg;
+    // A hairline border, so inputs, buttons and checkboxes stay visible on
+    // light themes, where the input color matches the page.
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0, p.border);
     v.widgets.hovered.weak_bg_fill = p.list_active;
     v.window_corner_radius = 10.into();
     v.menu_corner_radius = 8.into();

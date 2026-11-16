@@ -1,7 +1,7 @@
 //! The Keyboard Shortcuts panel: rebind app shortcuts by pressing keys, and
 //! manage simple Vim mappings without writing a script.
 
-use eframe::egui::{self, vec2, Align2, Color32, FontId, Frame, Key, RichText, Sense, Stroke, Ui};
+use eframe::egui::{self, vec2, Align2, Color32, CornerRadius, FontId, Frame, Key, Rect, RichText, Sense, Stroke, Ui};
 
 use crate::commands::{info_of, Chord, Command, Keybindings, MapEntry, COMMANDS};
 use crate::keymap::{self, Mapping};
@@ -139,7 +139,8 @@ impl KeysPanel {
                 let resp = ui.add(egui::Label::new(text).sense(Sense::click()));
                 if selected {
                     let r = resp.rect;
-                    ui.painter().line_segment([r.left_bottom() + vec2(0.0, 3.0), r.right_bottom() + vec2(0.0, 3.0)], Stroke::new(2.0, p.focus_border));
+                    let line = Rect::from_min_max(r.left_bottom() + vec2(0.0, 2.0), r.right_bottom() + vec2(0.0, 4.0));
+                    ui.painter().rect_filled(line, CornerRadius::same(1), p.accent);
                 }
                 if resp.clicked() {
                     self.tab = tab;
@@ -165,36 +166,48 @@ impl KeysPanel {
         );
         let filter = self.filter.to_lowercase();
         let footer = 46.0;
+        // Full-width rows: command, its keys, and the buttons at the right edge.
+        let row = |ui: &mut Ui, h: f32, add: &mut dyn FnMut(&mut Ui, Rect)| {
+            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
+            let layout = egui::Layout::left_to_right(egui::Align::Center);
+            ui.scope_builder(egui::UiBuilder::new().max_rect(r.shrink2(vec2(10.0, 0.0))).layout(layout), |ui| add(ui, r));
+        };
+        const TITLE_W: f32 = 190.0;
+        ui.add_space(2.0);
+        row(ui, 24.0, &mut |ui, _| {
+            column_text(ui, TITLE_W, "Command", 12.0, p.text_muted);
+            column_text(ui, 100.0, "Keybinding", 12.0, p.text_muted);
+        });
         egui::ScrollArea::vertical().max_height(ui.available_height() - footer).auto_shrink(false).show(ui, |ui| {
-            egui::Grid::new("shortcuts-grid").num_columns(3).spacing(vec2(18.0, 8.0)).striped(true).show(ui, |ui| {
-                ui.label(RichText::new("Command").color(p.text_muted));
-                ui.label(RichText::new("Keybinding").color(p.text_muted));
-                ui.label("");
-                ui.end_row();
-                for info in COMMANDS {
-                    let labels: Vec<String> = keys.chords(info.command).iter().map(Chord::label).collect();
-                    let matches = info.title.to_lowercase().contains(&filter)
-                        || labels.iter().any(|l| l.to_lowercase().contains(&filter));
-                    if !matches {
-                        continue;
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for info in COMMANDS {
+                let labels: Vec<String> = keys.chords(info.command).iter().map(Chord::label).collect();
+                let matches = info.title.to_lowercase().contains(&filter) || labels.iter().any(|l| l.to_lowercase().contains(&filter));
+                if !matches {
+                    continue;
+                }
+                row(ui, 32.0, &mut |ui, r| {
+                    let capturing = self.capturing == Some(info.command);
+                    if capturing {
+                        ui.painter().rect_filled(r, CornerRadius::same(6), p.list_active);
+                    } else if ui.rect_contains_pointer(r) {
+                        ui.painter().rect_filled(r, CornerRadius::same(6), p.list_hover);
                     }
-                    ui.label(RichText::new(info.title).color(p.text_bright));
-                    if self.capturing == Some(info.command) {
+                    column_text(ui, TITLE_W, info.title, 13.0, p.text_bright);
+                    if capturing {
                         ui.label(RichText::new("Press the new keys…  (Esc to cancel)").color(p.focus_border));
+                    } else if labels.is_empty() {
+                        ui.label(RichText::new("not set").color(p.text_muted).italics());
                     } else {
-                        ui.horizontal(|ui| {
-                            if labels.is_empty() {
-                                ui.label(RichText::new("not set").color(p.text_muted).italics());
-                            }
-                            for l in &labels {
-                                key_chip(ui, l);
-                            }
-                        });
+                        for l in &labels {
+                            key_chip(ui, l);
+                        }
                     }
-                    ui.horizontal(|ui| {
-                        if ui.button("Change").on_hover_text("Click, then press the keys you want").clicked() {
-                            self.capturing = Some(info.command);
-                            self.notice = None;
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if !labels.is_empty() && ui.button("Remove").clicked() {
+                            keys.unbind(info.command);
+                            self.notice = Some(format!("{} has no shortcut now", info.title));
+                            out.changed = true;
                         }
                         if !keys.is_default(info.command) && ui.button("Reset").clicked() {
                             let taken = keys.reset(info.command);
@@ -205,15 +218,13 @@ impl KeysPanel {
                             });
                             out.changed = true;
                         }
-                        if !labels.is_empty() && ui.button("Remove").clicked() {
-                            keys.unbind(info.command);
-                            self.notice = Some(format!("{} has no shortcut now", info.title));
-                            out.changed = true;
+                        if ui.button("Change").on_hover_text("Click, then press the keys you want").clicked() {
+                            self.capturing = Some(info.command);
+                            self.notice = None;
                         }
                     });
-                    ui.end_row();
-                }
-            });
+                });
+            }
         });
         ui.separator();
         let text = self.notice.clone().unwrap_or_else(|| "Changes are saved right away to keybindings.toml in your Vex config folder.".into());
@@ -232,11 +243,13 @@ impl KeysPanel {
         let mut remove = None;
         egui::ScrollArea::vertical().max_height(ui.available_height() - 150.0).auto_shrink(false).show(ui, |ui| {
             egui::Grid::new("maps-grid").num_columns(4).spacing(vec2(12.0, 8.0)).show(ui, |ui| {
-                ui.label(RichText::new("Mode").color(p.text_muted));
-                ui.label(RichText::new("When I type").color(p.text_muted));
-                ui.label(RichText::new("Do this").color(p.text_muted));
-                ui.label("");
-                ui.end_row();
+                if !keys.maps.is_empty() {
+                    ui.label(RichText::new("Mode").color(p.text_muted));
+                    ui.label(RichText::new("When I type").color(p.text_muted));
+                    ui.label(RichText::new("Do this").color(p.text_muted));
+                    ui.label("");
+                    ui.end_row();
+                }
                 for (i, m) in keys.maps.iter_mut().enumerate() {
                     let mode = keymap::MapMode::from_name(&m.mode).unwrap_or(keymap::MapMode::Normal);
                     egui::ComboBox::from_id_salt(("map-mode", i)).width(90.0).selected_text(capitalize(mode.name())).show_ui(ui, |ui| {
@@ -308,15 +321,17 @@ fn capitalize(s: &str) -> String {
     c.next().map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
 }
 
+/// Left-aligned text in a column of fixed width.
+fn column_text(ui: &mut Ui, width: f32, text: &str, size: f32, color: Color32) {
+    let (r, _) = ui.allocate_exact_size(vec2(width, 20.0), Sense::hover());
+    ui.painter().text(r.left_center(), Align2::LEFT_CENTER, text, FontId::proportional(size), color);
+}
+
 /// A key combination drawn as a keycap-style chip.
 fn key_chip(ui: &mut Ui, label: &str) {
     let p = theme::p();
-    Frame::NONE
-        .fill(p.input_bg)
-        .stroke(Stroke::new(1.0, p.border))
-        .corner_radius(4)
-        .inner_margin(egui::Margin::symmetric(6, 1))
-        .show(ui, |ui| {
-            ui.label(RichText::new(label).font(FontId::monospace(12.5)).color(p.text_bright));
-        });
+    let g = ui.painter().layout_no_wrap(label.to_string(), FontId::monospace(12.5), p.text_bright);
+    let (r, _) = ui.allocate_exact_size(vec2(g.size().x + 14.0, 22.0), Sense::hover());
+    ui.painter().rect(r, CornerRadius::same(5), p.input_bg, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+    ui.painter().galley(r.center() - g.size() / 2.0, g, p.text_bright);
 }

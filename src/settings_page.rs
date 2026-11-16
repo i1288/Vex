@@ -159,13 +159,15 @@ impl SettingsPage {
             let (r, resp) = nav_ui.allocate_exact_size(vec2(nav.width(), 30.0), Sense::click());
             let selected = search.is_empty() && self.section == section;
             if selected {
-                nav_ui.painter().rect_filled(r, CornerRadius::same(4), p.list_active);
-                nav_ui.painter().rect_filled(Rect::from_min_size(r.min, vec2(3.0, r.height())), CornerRadius::same(2), p.accent);
+                nav_ui.painter().rect_filled(r, CornerRadius::same(6), p.list_active);
+                // A short pill inside the highlight, like the activity bar's marker.
+                let marker = Rect::from_center_size(pos2(r.left() + 5.0, r.center().y), vec2(3.0, 14.0));
+                nav_ui.painter().rect_filled(marker, CornerRadius::same(2), p.accent);
             } else if resp.hovered() {
-                nav_ui.painter().rect_filled(r, CornerRadius::same(4), p.list_hover);
+                nav_ui.painter().rect_filled(r, CornerRadius::same(6), p.list_hover);
             }
             let color = if selected { p.text_bright } else { p.text_ui };
-            nav_ui.painter().text(r.left_center() + vec2(14.0, 0.0), Align2::LEFT_CENTER, label, FontId::proportional(13.5), color);
+            nav_ui.painter().text(r.left_center() + vec2(16.0, 0.0), Align2::LEFT_CENTER, label, FontId::proportional(13.5), color);
             if resp.clicked() {
                 self.section = section;
                 self.search.clear();
