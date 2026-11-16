@@ -98,7 +98,31 @@ Vex underlines syntax errors as you type in **Rust, Python, JavaScript, TypeScri
 - Files with errors get a red tab name and red marks on the scrollbar.
 - Turn it off in Settings → Editor → Syntax checking, with `syntax_check = false`, or with `:set nosyntaxcheck`.
 
-It catches syntax mistakes: unclosed brackets, stray tokens, missing `;`, broken JSON. Type errors, such as a wrong argument type, need a language server.
+It catches syntax mistakes: unclosed brackets, stray tokens, missing `;`, broken JSON.
+
+### Type checking (language servers)
+
+For type errors, unknown names, wrong arguments and the like, Vex uses the same **language servers** VS Code does. A server starts automatically when you open a file it handles, as long as it's installed:
+
+| Language | Server | Install |
+|---|---|---|
+| Rust | rust-analyzer | `rustup component add rust-analyzer` |
+| Python | basedpyright, pyright or pylsp | `pip install basedpyright` |
+| JavaScript / TypeScript | typescript-language-server | `npm i -g typescript typescript-language-server` |
+| C / C++ | clangd | your package manager (`apt install clangd`, `brew install llvm`) |
+| Go | gopls | `go install golang.org/x/tools/gopls@latest` |
+| Bash | bash-language-server | `npm i -g bash-language-server` |
+| Java | jdtls | Eclipse JDT Language Server |
+
+Errors get red squiggles and warnings yellow ones, in the same places as syntax errors. While a server starts up or indexes, its progress shows in the status bar. Settings → Editor → Type checking shows which servers Vex found. Turn it off with `type_check = false` or `:set notypecheck`. To use a different server, or to turn one off, set its command in `settings.toml`:
+
+```toml
+[language_servers]
+python = "pylsp"
+go = ""          # don't start gopls
+```
+
+When you open a single file, Vex opens its project too: the nearest folder above it with a `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod` or `.git`.
 
 ## Other keyboard layouts (Colemak, Dvorak, AZERTY…)
 
@@ -181,6 +205,7 @@ src/
   buffer.rs    text buffer, file I/O, undo/redo
   syntax.rs    keyword-based syntax highlighting
   diagnostics.rs  tree-sitter syntax checking on a background thread
+  lsp.rs       language server client for type checking
   explorer.rs  file tree and fuzzy file finder
   settings.rs  settings file and :set options
   settings_page.rs  the Settings page

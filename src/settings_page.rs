@@ -45,6 +45,8 @@ pub struct SettingsPage {
     color_search: String,
     /// Monospace fonts found on the system, scanned the first time they're needed.
     fonts: Option<Vec<(String, PathBuf)>>,
+    /// Installed language servers (name → found command), looked up once.
+    servers: Option<Vec<(String, Option<String>, &'static str)>>,
     new_theme_name: String,
     notice: Option<String>,
 }
@@ -56,6 +58,7 @@ impl Default for SettingsPage {
             search: String::new(),
             color_search: String::new(),
             fonts: None,
+            servers: None,
             new_theme_name: "My Theme".into(),
             notice: None,
         }
@@ -175,7 +178,7 @@ impl SettingsPage {
                 out.changed |= match section {
                     Section::Appearance => self.appearance(ui, &mut rows, st),
                     Section::Theme => self.theme(ui, &mut rows, st, &mut out),
-                    Section::Editor => editor(ui, &mut rows, st),
+                    Section::Editor => self.editor(ui, &mut rows, st),
                     Section::Files => files(ui, &mut rows, st),
                     Section::Terminal => terminal(ui, &mut rows, st),
                     Section::Keyboard => keyboard(ui, &mut rows, st, &mut out),
@@ -328,6 +331,52 @@ impl SettingsPage {
                 ui.end_row();
             }
         });
+        changed
+    }
+}
+
+impl SettingsPage {
+    fn editor(&mut self, ui: &mut Ui, rows: &mut Rows, st: &mut Settings) -> bool {
+        let mut changed = editor(ui, rows, st);
+        changed |= rows.row(
+            ui,
+            "Type checking",
+            "Finds type errors, unknown names and other mistakes using each language's language server, the same tools VS Code uses. Servers that are installed start automatically; install others to add languages. To use a different server, set its command under [language_servers] in settings.toml.",
+            |ui| {
+                let changed = ui.checkbox(&mut st.type_check, "Use language servers").changed();
+                let servers = self.servers.get_or_insert_with(|| {
+                    crate::lsp::SERVERS
+                        .iter()
+                        .map(|(key, name, hint)| {
+                            let found = crate::lsp::language_for(match *key {
+                                "rust" => "rs",
+                                "python" => "py",
+                                "typescript" => "ts",
+                                "c" => "c",
+                                "go" => "go",
+                                "bash" => "sh",
+                                _ => "java",
+                            })
+                            .and_then(|lang| crate::lsp::resolve_command(&lang, &st.language_servers))
+                            .map(|cmd| cmd.join(" "));
+                            (name.to_string(), found, *hint)
+                        })
+                        .collect()
+                });
+                let p = theme::p();
+                egui::Grid::new("servers").num_columns(2).spacing(vec2(18.0, 4.0)).show(ui, |ui| {
+                    for (name, found, hint) in servers.iter() {
+                        ui.label(RichText::new(name).color(p.text_ui));
+                        match found {
+                            Some(cmd) => ui.label(RichText::new(format!("✔ {cmd}")).color(p.string)),
+                            None => ui.label(RichText::new(format!("not installed: {hint}")).color(p.text_muted)),
+                        };
+                        ui.end_row();
+                    }
+                });
+                changed
+            },
+        );
         changed
     }
 }

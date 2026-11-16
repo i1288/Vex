@@ -63,9 +63,14 @@ pub struct Buffer {
     pub id: u64,
     /// Bumped on every edit, so background work can tell if it is stale.
     pub version: u64,
-    /// Syntax errors from the last check, and the version that check was for.
+    /// Problems to show: language-server results plus syntax errors on lines
+    /// the server didn't flag. Rebuilt by `merge_diagnostics`.
     pub diagnostics: Vec<crate::diagnostics::Diagnostic>,
+    /// From the tree-sitter syntax check, and the version it was run on.
+    pub syntax_diagnostics: Vec<crate::diagnostics::Diagnostic>,
     pub checked_version: Option<u64>,
+    /// From the language server (type checking).
+    pub lsp_diagnostics: Vec<crate::diagnostics::Diagnostic>,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
 }
@@ -98,7 +103,9 @@ impl Buffer {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             version: 0,
             diagnostics: Vec::new(),
+            syntax_diagnostics: Vec::new(),
             checked_version: None,
+            lsp_diagnostics: Vec::new(),
             undo: Vec::new(),
             redo: Vec::new(),
         }
@@ -243,6 +250,18 @@ impl Buffer {
     }
 
     // ---- editing -------------------------------------------------------
+
+    /// Combine syntax and language-server problems for display. A line the
+    /// server reports an error on doesn't also get the syntax error.
+    pub fn merge_diagnostics(&mut self) {
+        use crate::diagnostics::Severity;
+        let mut all = self.lsp_diagnostics.clone();
+        let server_lines: std::collections::HashSet<usize> =
+            self.lsp_diagnostics.iter().filter(|d| d.severity == Severity::Error).map(|d| d.start.line).collect();
+        all.extend(self.syntax_diagnostics.iter().filter(|d| !server_lines.contains(&d.start.line)).cloned());
+        all.sort_by_key(|d| (d.start, d.severity));
+        self.diagnostics = all;
+    }
 
     /// Record that the text changed.
     pub fn touch(&mut self) {

@@ -312,7 +312,7 @@ impl View<'_> {
                     let b = if d.end.line == l { d.end.col.min(len) } else { len }.max(a + 1);
                     let (lo, hi) = (a.max(s), b.min(if last { len + 1 } else { e }));
                     if lo < hi {
-                        squiggle(&text_painter, x_of(lo), x_of(hi), y + line_h - 2.5, p.error);
+                        squiggle(&text_painter, x_of(lo), x_of(hi), y + line_h - 2.5, theme::severity_color(&p, d.severity));
                     }
                 }
 
@@ -417,7 +417,7 @@ impl View<'_> {
             let x = rect.right() - 6.0;
             for d in buf.diagnostics.iter().filter(|d| d.start.line < row_of_line.len() - 1) {
                 let y = rect.top() + row_of_line[d.start.line] as f32 / rows.max(1) as f32 * rect.height();
-                painter.rect_filled(Rect::from_min_size(pos2(x, y), vec2(5.0, 3.0)), 1.0, p.error);
+                painter.rect_filled(Rect::from_min_size(pos2(x, y), vec2(5.0, 3.0)), 1.0, theme::severity_color(&p, d.severity));
             }
         }
 
@@ -448,9 +448,10 @@ impl View<'_> {
             let x = ((ptr.x - text_x0 + scroll_x) / char_w).max(0.0) as usize;
             let pos = Pos::new(l, lay.col_at((r - row_of_line[l]).min(lay.rows() - 1), x));
             if let Some(d) = buf.diagnostics.iter().find(|d| d.contains(pos)) {
-                let msg = d.message.clone();
+                let (msg, color) = (d.message.clone(), theme::severity_color(&p, d.severity));
                 return resp.on_hover_ui_at_pointer(|ui| {
-                    ui.label(egui::RichText::new(msg).color(p.error));
+                    ui.set_max_width(520.0);
+                    ui.label(egui::RichText::new(msg).color(color));
                 });
             }
         }

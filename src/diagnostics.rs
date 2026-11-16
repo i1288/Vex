@@ -13,12 +13,20 @@ use crate::buffer::Pos;
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DIAGNOSTICS: usize = 200;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Severity {
+    Error,
+    Warning,
+    Info,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Diagnostic {
     pub start: Pos,
     /// Exclusive; equal to `start` for something missing at a point.
     pub end: Pos,
     pub message: String,
+    pub severity: Severity,
 }
 
 impl Diagnostic {
@@ -122,7 +130,7 @@ pub fn check(parser: &mut Parser, text: &str) -> Vec<Diagnostic> {
         }
         if node.is_missing() {
             let at = pos(node.start_position());
-            out.push(Diagnostic { start: at, end: at, message: missing_message(node.kind()) });
+            out.push(Diagnostic { start: at, end: at, message: missing_message(node.kind()), severity: Severity::Error });
         } else if node.is_error() {
             let start = pos(node.start_position());
             let mut end = pos(node.end_position());
@@ -131,7 +139,7 @@ pub fn check(parser: &mut Parser, text: &str) -> Vec<Diagnostic> {
                 let len = lines.get(start.line).map_or(0, |l| l.chars().count());
                 end = Pos::new(start.line, len.max(start.col + 1));
             }
-            out.push(Diagnostic { start, end, message: error_message(node, text) });
+            out.push(Diagnostic { start, end, message: error_message(node, text), severity: Severity::Error });
         } else if node.has_error() {
             let mut cursor = node.walk();
             let children: Vec<Node> = node.children(&mut cursor).collect();

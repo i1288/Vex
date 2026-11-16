@@ -8,6 +8,7 @@ mod diagnostics;
 mod explorer;
 mod keymap;
 mod keys_panel;
+mod lsp;
 mod settings;
 mod settings_page;
 mod snapshot;
@@ -33,7 +34,7 @@ fn main() -> eframe::Result {
         Some(p) if p.is_dir() => (p, None),
         Some(p) => {
             let p = if p.is_absolute() { p } else { cwd.join(p) };
-            let root = p.parent().map_or(cwd.clone(), |d| d.to_path_buf());
+            let root = project_root(&p).unwrap_or_else(|| p.parent().map_or(cwd.clone(), |d| d.to_path_buf()));
             (root, Some(p))
         }
         None if launched_from_gui(&cwd) => {
@@ -66,4 +67,22 @@ fn main() -> eframe::Result {
 fn launched_from_gui(cwd: &std::path::Path) -> bool {
     let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf()));
     cwd.parent().is_none() || exe_dir.as_deref() == Some(cwd)
+}
+
+/// The nearest folder above `file` that looks like a project root, so a file
+/// opened on its own still gets its project's explorer and language server.
+fn project_root(file: &std::path::Path) -> Option<PathBuf> {
+    const MARKERS: &[&str] = &["Cargo.toml", "package.json", "pyproject.toml", "go.mod", ".git"];
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut dir = file.parent();
+    while let Some(d) = dir {
+        if Some(d) == home.as_deref() {
+            return None; // never treat the home folder as a project
+        }
+        if MARKERS.iter().any(|m| d.join(m).exists()) {
+            return Some(d.to_path_buf());
+        }
+        dir = d.parent();
+    }
+    None
 }

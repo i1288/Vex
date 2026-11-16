@@ -39,6 +39,8 @@ pub struct Settings {
     pub scroll_off: usize,
     /// Underline syntax errors as you type.
     pub syntax_check: bool,
+    /// Run language servers for type checking.
+    pub type_check: bool,
     // Keyboard
     /// Vim commands follow key positions (as on QWERTY), for other keyboard layouts.
     pub vim_key_positions: bool,
@@ -51,6 +53,10 @@ pub struct Settings {
     pub terminal_font_size: f32,
     /// Empty for the default shell.
     pub terminal_shell: String,
+    /// Language server command per server (rust, python, typescript, c, go,
+    /// bash, java); an empty string turns that server off.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub language_servers: BTreeMap<String, String>,
     /// Color overrides on top of the theme: field name → "#rrggbb".
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub colors: BTreeMap<String, String>,
@@ -78,12 +84,14 @@ impl Default for Settings {
             breadcrumbs: true,
             scroll_off: 4,
             syntax_check: true,
+            type_check: true,
             vim_key_positions: false,
             auto_save: false,
             auto_save_delay_ms: 1000,
             trim_trailing_whitespace: false,
             terminal_font_size: 0.0,
             terminal_shell: String::new(),
+            language_servers: BTreeMap::new(),
             colors: BTreeMap::new(),
         }
     }
@@ -204,6 +212,7 @@ impl Settings {
             ("Show the file path above the editor", format!("breadcrumbs = {}", b(self.breadcrumbs))),
             ("Lines kept visible above and below the cursor", format!("scroll_off = {}", self.scroll_off)),
             ("Underline syntax errors as you type (Rust, Python, JS/TS, C/C++, Go, Java, JSON, Bash, CSS, HTML, TOML, YAML)", format!("syntax_check = {}", b(self.syntax_check))),
+            ("Type checking with language servers (rust-analyzer, pyright, clangd, gopls, ...) when installed", format!("type_check = {}", b(self.type_check))),
         ];
         flush(&mut out, &mut lines);
         out.push_str("\n# ---- Keyboard ----\n");
@@ -225,6 +234,10 @@ impl Settings {
             ("Shell to run; empty for your default shell", format!("terminal_shell = {}", quote(&self.terminal_shell))),
         ];
         flush(&mut out, &mut lines);
+        out.push_str("\n# Language server commands, to use another server or turn one off with \"\".\n# Keys: rust, python, typescript, c, go, bash, java. Example: python = \"pylsp\"\n[language_servers]\n");
+        for (k, v) in &self.language_servers {
+            out.push_str(&format!("{k} = {}\n", quote(v)));
+        }
         out.push_str("\n# Color overrides on top of the theme, e.g. keyword = \"#ff79c6\".\n# The Settings page lists every color name.\n[colors]\n");
         for (k, v) in &self.colors {
             out.push_str(&format!("{k} = {}\n", quote(v)));
@@ -306,6 +319,7 @@ impl Settings {
             "cursorblink" => &mut self.cursor_blink,
             "breadcrumbs" => &mut self.breadcrumbs,
             "syntaxcheck" => &mut self.syntax_check,
+            "typecheck" => &mut self.type_check,
             "autosave" => &mut self.auto_save,
             "physicalkeys" | "pk" => &mut self.vim_key_positions,
             _ => return None,
@@ -344,6 +358,8 @@ mod tests {
         s.render_whitespace = "all".into();
         s.ui_scale = 1.25;
         s.vim_key_positions = true;
+        s.language_servers.insert("python".into(), "pylsp".into());
+        s.language_servers.insert("go".into(), "".into());
         assert_eq!(parse(&s.to_toml()).unwrap(), s);
     }
 

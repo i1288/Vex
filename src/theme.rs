@@ -60,6 +60,7 @@ pub struct Palette {
     pub scrollbar: Color32,
     /// Syntax error squiggles and counts.
     pub error: Color32,
+    pub warning: Color32,
 
     pub keyword: Color32,
     pub control: Color32,
@@ -112,6 +113,7 @@ pub const DARK_MODERN: Palette = Palette {
     tree_guide: hex(0x3c3c3c),
     scrollbar: hex(0x797979),
     error: hex(0xf14c4c),
+    warning: hex(0xcca700),
     keyword: hex(0x569cd6),
     control: hex(0xc586c0),
     type_: hex(0x4ec9b0),
@@ -166,6 +168,7 @@ pub const LIGHT_MODERN: Palette = Palette {
     tree_guide: hex(0xd3d3d3),
     scrollbar: hex(0x646464),
     error: hex(0xe51400),
+    warning: hex(0xbf8803),
     keyword: hex(0x0000ff),
     control: hex(0xaf00db),
     type_: hex(0x267f99),
@@ -221,6 +224,7 @@ pub const DARK_PLUS: Palette = Palette {
     tree_guide: hex(0x454545),
     scrollbar: hex(0x797979),
     error: hex(0xf14c4c),
+    warning: hex(0xcca700),
     keyword: hex(0x569cd6),
     control: hex(0xc586c0),
     type_: hex(0x4ec9b0),
@@ -276,6 +280,7 @@ pub const LIGHT_PLUS: Palette = Palette {
     tree_guide: hex(0xc8c8c8),
     scrollbar: hex(0x646464),
     error: hex(0xe51400),
+    warning: hex(0xbf8803),
     keyword: hex(0x0000ff),
     control: hex(0xaf00db),
     type_: hex(0x267f99),
@@ -359,6 +364,7 @@ color_fields! {
     tree_guide: "Tree guides",
     scrollbar: "Scrollbar",
     error: "Errors",
+    warning: "Warnings",
 }
 
 /// The few colors a built-in community theme is defined by; everything else
@@ -428,6 +434,7 @@ fn derive(s: &Spec) -> Palette {
         tree_guide: mix(surface, fg, 0.15),
         scrollbar: hex(s.muted),
         error: if s.dark { hex(0xf14c4c) } else { hex(0xe51400) },
+        warning: if s.dark { hex(0xcca700) } else { hex(0xbf8803) },
         keyword,
         control,
         type_,
@@ -632,6 +639,15 @@ pub fn export_current(dir: &Path, name: &str) -> std::io::Result<PathBuf> {
     let path = dir.join(format!("{slug}.toml"));
     std::fs::write(&path, out)?;
     Ok(path)
+}
+
+/// Color for a problem of this severity.
+pub fn severity_color(p: &Palette, s: crate::diagnostics::Severity) -> Color32 {
+    match s {
+        crate::diagnostics::Severity::Error => p.error,
+        crate::diagnostics::Severity::Warning => p.warning,
+        crate::diagnostics::Severity::Info => p.accent,
+    }
 }
 
 /// Status-bar badge color for each mode.

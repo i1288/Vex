@@ -10,7 +10,8 @@ use eframe::egui::{
 
 use crate::buffer::{self, tab_size, Buffer, Pos};
 use crate::commands::{self, Command, Keybindings};
-use crate::diagnostics::{Checker, Grammar};
+use crate::diagnostics::{Checker, Grammar, Severity};
+use crate::lsp;
 use crate::explorer::{self, Explorer};
 use crate::keymap::{self, MapMode, Mapping, Origin};
 use crate::keys_panel::KeysPanel;
@@ -60,6 +61,12 @@ pub struct VexApp {
     logo: egui::TextureHandle,
     /// Background syntax checker.
     checker: Checker,
+    /// Language servers, for type checking.
+    lsp: lsp::Manager,
+    /// What each language server is busy with, like "Indexing 40%".
+    lsp_progress: std::collections::BTreeMap<String, String>,
+    /// The language-server settings the servers were started with.
+    applied_lsp: Option<(bool, std::collections::BTreeMap<String, String>)>,
     keys: Keybindings,
     keys_panel: Option<KeysPanel>,
     settings_page: Option<SettingsPage>,
@@ -99,6 +106,12 @@ impl VexApp {
                 let ctx = cc.egui_ctx.clone();
                 Checker::new(move || ctx.request_repaint())
             },
+            lsp: {
+                let ctx = cc.egui_ctx.clone();
+                lsp::Manager::new(move || ctx.request_repaint())
+            },
+            lsp_progress: Default::default(),
+            applied_lsp: None,
             keys: Keybindings::default(),
             keys_panel: None,
             settings_page: None,
@@ -139,6 +152,12 @@ impl VexApp {
         }
         theme::apply_visuals(ctx);
         ctx.set_zoom_factor(self.settings.ui_scale);
+        let lsp_settings = (self.settings.type_check, self.settings.language_servers.clone());
+        if self.applied_lsp.as_ref().is_some_and(|a| *a != lsp_settings) {
+            self.lsp.shutdown_all(); // restarted with the new commands as files sync
+            self.lsp_progress.clear();
+        }
+        self.applied_lsp = Some(lsp_settings);
         if self.applied_font.as_deref() != Some(self.settings.font_family.as_str()) {
             let path = (!self.settings.font_family.is_empty()).then(|| PathBuf::from(&self.settings.font_family));
             if let Err(e) = theme::install_fonts(ctx, path.as_deref()) {
@@ -489,7 +508,9 @@ impl VexApp {
                 let msg = format!("\"{}\" {}L, {}B written", buf.name(), buf.line_count(), bytes);
                 let is_settings = buf.path.is_some() && buf.path == settings::path();
                 let is_script = buf.path.is_some() && buf.path == settings::init_script_path();
+                let id = buf.id;
                 self.info(msg);
+                self.lsp.did_save(id);
                 self.explorer.refresh();
                 if is_settings && self.reload_settings(&self.ctx.clone()) {
                     self.info("Settings applied");
@@ -655,44 +676,94 @@ impl VexApp {
         phase >= 0.5
     }
 
-    /// Collect finished syntax checks, and send changed files to the checker
-    /// once typing pauses.
+    /// Collect finished syntax checks and language-server results, and send
+    /// changed files to both once typing pauses.
     fn update_diagnostics(&mut self, ctx: &egui::Context) {
+        const PAUSE: f64 = 0.15;
+        let idle = ctx.input(|i| i.time) - self.last_input;
+        let paused = idle >= PAUSE;
+        let mut waiting = false;
+
+        // Syntax (tree-sitter).
         let results: Vec<_> = self.checker.results().collect();
-        if !self.settings.syntax_check {
-            for buf in &mut self.ws.buffers {
-                buf.diagnostics.clear();
-                buf.checked_version = None;
-            }
-            return;
-        }
         for done in results {
             // A result for an older version is stale; a newer check is on its way.
             if let Some(buf) = self.ws.buffers.iter_mut().find(|b| b.id == done.id && b.version == done.version) {
-                buf.diagnostics = done.diagnostics;
+                buf.syntax_diagnostics = done.diagnostics;
+                buf.merge_diagnostics();
             }
         }
-        const PAUSE: f64 = 0.15;
-        let idle = ctx.input(|i| i.time) - self.last_input;
-        let mut waiting = false;
         for buf in &mut self.ws.buffers {
-            let Some(grammar) = Grammar::for_extension(&buf.extension()) else {
-                buf.diagnostics.clear();
+            let grammar = Grammar::for_extension(&buf.extension()).filter(|_| self.settings.syntax_check);
+            let Some(grammar) = grammar else {
+                if !buf.syntax_diagnostics.is_empty() {
+                    buf.syntax_diagnostics.clear();
+                    buf.merge_diagnostics();
+                }
+                buf.checked_version = None;
                 continue;
             };
             if buf.checked_version == Some(buf.version) {
                 continue;
             }
             // A newly opened file is checked right away; edits wait for a pause.
-            if buf.checked_version.is_some() && idle < PAUSE {
+            if buf.checked_version.is_some() && !paused {
                 waiting = true;
                 continue;
             }
             buf.checked_version = Some(buf.version);
             self.checker.submit(buf.id, buf.version, grammar, buf.text());
         }
+
+        // Types (language servers).
+        if self.settings.type_check {
+            let root = self.explorer.root.clone();
+            for buf in &self.ws.buffers {
+                let (Some(path), Some(lang)) = (&buf.path, lsp::language_for(&buf.extension())) else { continue };
+                if !paused && self.lsp.is_open(buf.id) {
+                    waiting |= self.lsp.is_stale(buf.id, buf.version);
+                    continue;
+                }
+                let text = || buf.text();
+                let doc = lsp::Doc { id: buf.id, path, version: buf.version, text: &text, saved: !buf.dirty };
+                self.lsp.sync(&doc, &lang, &root, &self.settings.language_servers);
+            }
+            let open: std::collections::HashSet<u64> = self.ws.buffers.iter().map(|b| b.id).collect();
+            self.lsp.close_missing(&open);
+            for event in self.lsp.poll() {
+                match event {
+                    lsp::Event::Diagnostics { path, diagnostics } => {
+                        let path = path.canonicalize().unwrap_or(path);
+                        let Some(buf) = self.ws.buffers.iter_mut().find(|b| b.path.as_deref() == Some(path.as_path())) else {
+                            continue;
+                        };
+                        buf.lsp_diagnostics = diagnostics.iter().map(|d| d.to_diagnostic(&buf.lines)).collect();
+                        buf.merge_diagnostics();
+                    }
+                    lsp::Event::Progress { server, text } => match text {
+                        Some(t) => {
+                            self.lsp_progress.insert(server, t);
+                        }
+                        None => {
+                            self.lsp_progress.remove(&server);
+                        }
+                    },
+                    lsp::Event::Exited { server } => {
+                        self.lsp_progress.remove(&server);
+                        self.error(format!("The {server} language server stopped"));
+                    }
+                }
+            }
+        } else if !self.lsp.running().is_empty() || self.ws.buffers.iter().any(|b| !b.lsp_diagnostics.is_empty()) {
+            self.lsp.shutdown_all();
+            self.lsp_progress.clear();
+            for buf in &mut self.ws.buffers {
+                buf.lsp_diagnostics.clear();
+                buf.merge_diagnostics();
+            }
+        }
         if waiting {
-            ctx.request_repaint_after(std::time::Duration::from_secs_f64(PAUSE - idle));
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64((PAUSE - idle).max(0.01)));
         }
     }
 
@@ -1045,7 +1116,13 @@ impl VexApp {
                 (true, false) => p.text_ui,
                 _ => p.text_muted,
             };
-            let color = if b.diagnostics.is_empty() { color } else { p.error };
+            let color = if b.diagnostics.iter().any(|d| d.severity == Severity::Error) {
+                p.error
+            } else if b.diagnostics.is_empty() {
+                color
+            } else {
+                p.warning
+            };
             let name = galley(ui.ctx(), b.name(), UI_SIZE, color);
             let w = 12.0 + 16.0 + 4.0 + name.size().x + 8.0 + 20.0 + 6.0;
             let r = Rect::from_min_size(pos2(x, bar.top()), vec2(w, bar.height()));
@@ -1184,36 +1261,49 @@ impl VexApp {
             x = r.right() + 14.0;
         }
         // Syntax errors: a count to click (next error), and the message for the cursor's line.
-        let (error_count, cursor_error) = match self.ws.current_buf() {
+        let (errors, warnings, cursor_problem) = match self.ws.current_buf() {
             Some(b) => (
-                b.diagnostics.len(),
+                b.diagnostics.iter().filter(|d| d.severity == Severity::Error).count(),
+                b.diagnostics.iter().filter(|d| d.severity != Severity::Error).count(),
                 b.diagnostics
                     .iter()
                     .find(|d| d.contains(b.cursor))
                     .or_else(|| b.diagnostics.iter().find(|d| d.start.line == b.cursor.line))
-                    .map(|d| d.message.clone()),
+                    .map(|d| (d.message.lines().next().unwrap_or("").to_string(), d.severity)),
             ),
-            None => (0, None),
+            None => (0, 0, None),
         };
-        if error_count > 0 {
+        if errors + warnings > 0 {
             let p = theme::p();
-            let count = galley(ui.ctx(), error_count.to_string(), 12.0, fg);
-            let r = Rect::from_min_size(pos2(x - 5.0, rect.top() + 2.0), vec2(count.size().x + 28.0, rect.height() - 4.0));
+            let err_count = galley(ui.ctx(), errors.to_string(), 12.0, fg);
+            let warn_count = galley(ui.ctx(), warnings.to_string(), 12.0, fg);
+            let warn_x = x + 16.0 + err_count.size().x + 10.0;
+            let width = warn_x - x + 16.0 + warn_count.size().x + 6.0;
+            let r = Rect::from_min_size(pos2(x - 5.0, rect.top() + 2.0), vec2(width + 5.0, rect.height() - 4.0));
             let resp = ui.interact(r, ui.scope_id().with("status-errors"), Sense::click());
             if resp.hovered() {
                 painter.rect_filled(r, CornerRadius::same(3), p.list_hover);
             }
+            // Error count: a circled x. Warning count: a triangle.
             let c = pos2(x + 6.0, rect.center().y);
             painter.circle_stroke(c, 5.5, Stroke::new(1.3, p.error));
             draw_x(painter, c, 2.3, p.error);
-            painter.galley(pos2(x + 16.0, rect.center().y - count.size().y / 2.0), count, fg);
+            painter.galley(pos2(x + 16.0, rect.center().y - err_count.size().y / 2.0), err_count, fg);
+            let t = pos2(warn_x, rect.center().y);
+            painter.add(Shape::convex_polygon(
+                vec![pos2(t.x, t.y + 5.0), pos2(t.x + 6.0, t.y - 5.5), pos2(t.x + 12.0, t.y + 5.0)],
+                Color32::TRANSPARENT,
+                Stroke::new(1.3, p.warning),
+            ));
+            painter.galley(pos2(warn_x + 16.0, rect.center().y - warn_count.size().y / 2.0), warn_count, fg);
             x = r.right() + 12.0;
-            if resp.on_hover_text("Syntax errors: click, or ]d / [d, to go to the next one").clicked() {
+            if resp.on_hover_text("Errors and warnings: click, or ]d / [d, to go to the next one").clicked() {
                 self.jump_diagnostic(true);
             }
         }
-        if let (None, Some(msg)) = (&self.vim.message, cursor_error) {
-            painter.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, msg, font.clone(), theme::p().error);
+        if let (None, Some((msg, severity))) = (&self.vim.message, cursor_problem) {
+            let p = theme::p();
+            painter.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, msg, font.clone(), theme::severity_color(&p, severity));
         }
         if let Some(msg) = &self.vim.message {
             let error = self.vim.message_is_error;
@@ -1239,6 +1329,9 @@ impl VexApp {
                 None => {}
             }
             items.push(format!("Ln {}, Col {}", b.cursor.line + 1, b.visual_col(b.cursor.line, b.cursor.col) + 1));
+        }
+        if let Some((server, text)) = self.lsp_progress.iter().next() {
+            items.push(format!("{server}: {text}"));
         }
         let pending = self.vim.pending_keys();
         if !pending.is_empty() {

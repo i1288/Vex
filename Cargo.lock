@@ -3732,6 +3732,7 @@ dependencies = [
  "portable-pty",
  "regex",
  "serde",
+ "serde_json",
  "toml",
  "tree-sitter",
  "tree-sitter-bash",
