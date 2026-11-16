@@ -102,6 +102,14 @@ fn combo(ui: &mut Ui, id: &str, value: &mut String, options: &[(&str, &str)]) ->
 }
 
 impl SettingsPage {
+    /// Jump to the section with this title.
+    pub fn show_section(&mut self, title: &str) {
+        if let Some(&(section, _)) = SECTIONS.iter().find(|s| s.1 == title) {
+            self.section = section;
+            self.search.clear();
+        }
+    }
+
     pub fn show(&mut self, ui: &mut Ui, rect: Rect, st: &mut Settings) -> Outcome {
         let mut out = Outcome::default();
         let p = theme::p();

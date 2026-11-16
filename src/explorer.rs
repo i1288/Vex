@@ -46,6 +46,10 @@ impl Explorer {
         self.cache.clear();
     }
 
+    pub fn collapse_all(&mut self) {
+        self.expanded.clear();
+    }
+
     pub fn toggle(&mut self, dir: &Path) {
         if !self.expanded.remove(dir) {
             self.expanded.insert(dir.to_path_buf());

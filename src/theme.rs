@@ -695,7 +695,15 @@ pub fn apply_visuals(ctx: &egui::Context) {
     // Panel edges: egui draws these between the sidebar, editor, terminal and status bar.
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.separator);
     v.widgets.hovered.bg_stroke = Stroke::new(1.0, p.focus_border);
-    v.window_corner_radius = 6.into();
+    // Rounded corners throughout: buttons, inputs, menus, popups.
+    for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
+        w.corner_radius = 6.into();
+    }
+    v.widgets.inactive.weak_bg_fill = p.input_bg;
+    v.widgets.inactive.bg_fill = p.input_bg;
+    v.widgets.hovered.weak_bg_fill = p.list_active;
+    v.window_corner_radius = 10.into();
+    v.menu_corner_radius = 8.into();
     ctx.set_theme(theme);
     ctx.set_visuals_of(theme, v);
 }
@@ -705,6 +713,8 @@ pub fn install(ctx: &egui::Context) {
     ctx.all_styles_mut(|s| {
         s.spacing.item_spacing = egui::vec2(0.0, 0.0);
         s.interaction.selectable_labels = false;
+        // Slim scrollbars that float over lists and grow when hovered.
+        s.spacing.scroll = egui::style::ScrollStyle::floating();
     });
     let _ = install_fonts(ctx, None);
 }

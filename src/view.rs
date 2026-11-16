@@ -2,7 +2,7 @@
 //! rectangle, with optional soft wrapping.
 
 use eframe::egui::text::{LayoutJob, TextFormat};
-use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Rect, Response, Sense, Stroke, Ui};
+use eframe::egui::{self, pos2, vec2, Align2, Color32, CornerRadius, FontId, Rect, Response, Sense, Stroke, Ui};
 
 use crate::buffer::{tab_size, Buffer, Pos};
 use crate::settings::Settings;
@@ -250,7 +250,7 @@ impl View<'_> {
 
             if l == cur_line_number && selection.is_none() && st.highlight_current_line {
                 let block = Rect::from_min_size(pos2(text_rect.left(), y0), vec2(text_rect.width(), line_h * lay.rows() as f32));
-                text_painter.rect_stroke(block.shrink(1.0), 0.0, Stroke::new(2.0, p.current_line), egui::StrokeKind::Inside);
+                text_painter.rect_stroke(block.shrink2(vec2(2.0, 0.5)), CornerRadius::same(4), Stroke::new(2.0, p.current_line), egui::StrokeKind::Inside);
             }
             let indent = if st.indent_guides { indent_width(buf, l) } else { 0 };
 
@@ -270,7 +270,7 @@ impl View<'_> {
                         if lo >= hi { (0.0, 0.0) } else { (x_of(lo), x_of(hi)) }
                     };
                     if x1 > x0 {
-                        text_painter.rect_filled(Rect::from_x_y_ranges(x0..=x1, y..=y + line_h), 0.0, p.selection);
+                        text_painter.rect_filled(Rect::from_x_y_ranges(x0..=x1, y..=y + line_h), CornerRadius::same(3), p.selection);
                     }
                 }
                 for &(ms, me) in &matches {
@@ -432,13 +432,16 @@ impl View<'_> {
                 buf.scroll_y = (buf.scroll_y + sresp.drag_delta().y * max_scroll / range).clamp(0.0, max_scroll);
             }
             let ty = rect.top() + buf.scroll_y / max_scroll.max(1.0) * range;
-            let thumb = Rect::from_min_size(pos2(track.left(), ty), vec2(SCROLLBAR_W, thumb_h));
-            let alpha = if sresp.dragged() || sresp.hovered() { 0x90 } else { 0x50 };
+            // A slim rounded thumb that widens while hovered or dragged.
+            let active = sresp.dragged() || sresp.hovered();
+            let width = if active { 10.0 } else { 6.0 };
+            let thumb = Rect::from_min_size(pos2(track.right() - width - 3.0, ty + 2.0), vec2(width, thumb_h - 4.0));
+            let alpha = if active { 0x99 } else { 0x55 };
             let sb = p.scrollbar;
-            painter.rect_filled(thumb, 0.0, Color32::from_rgba_unmultiplied(sb.r(), sb.g(), sb.b(), alpha));
+            painter.rect_filled(thumb, CornerRadius::same((width / 2.0) as u8), Color32::from_rgba_unmultiplied(sb.r(), sb.g(), sb.b(), alpha));
             let cur_row = row_of_line[c.line] + cur_row_in_line;
             let my = rect.top() + cur_row as f32 / rows.max(1) as f32 * rect.height();
-            painter.rect_filled(Rect::from_min_size(pos2(track.left(), my), vec2(SCROLLBAR_W, 2.0)), 0.0, p.cursor);
+            painter.rect_filled(Rect::from_min_size(pos2(track.right() - 12.0, my), vec2(9.0, 2.0)), CornerRadius::same(1), p.cursor);
         }
         // Hovering a squiggle shows its message.
         if let Some(ptr) = resp.hover_pos().filter(|_| !buf.diagnostics.is_empty()) {
@@ -573,7 +576,7 @@ fn draw_minimap(
     if resp.hovered() || resp.dragged() {
         let alpha = if resp.dragged() { 0.16 } else { 0.10 };
         let shade = if p.dark { Color32::WHITE } else { Color32::BLACK };
-        mm_painter.rect_filled(slider, 0.0, shade.gamma_multiply(alpha));
+        mm_painter.rect_filled(slider, CornerRadius::same(3), shade.gamma_multiply(alpha));
     }
 }
 
