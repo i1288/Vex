@@ -71,6 +71,10 @@ pub struct Buffer {
     pub checked_version: Option<u64>,
     /// From the language server (type checking).
     pub lsp_diagnostics: Vec<crate::diagnostics::Diagnostic>,
+    /// Lines changed since the last commit, for the gutter, and the version
+    /// they were worked out for.
+    pub git_changes: Vec<crate::git::LineChange>,
+    pub git_version: Option<u64>,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
 }
@@ -106,6 +110,8 @@ impl Buffer {
             syntax_diagnostics: Vec::new(),
             checked_version: None,
             lsp_diagnostics: Vec::new(),
+            git_changes: Vec::new(),
+            git_version: None,
             undo: Vec::new(),
             redo: Vec::new(),
         }

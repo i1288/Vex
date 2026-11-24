@@ -642,6 +642,24 @@ pub fn export_current(dir: &Path, name: &str) -> std::io::Result<PathBuf> {
 }
 
 /// Color for a problem of this severity.
+/// Colors for git changes: the gutter bars and the explorer's file names.
+pub fn git_color(p: &Palette, status: crate::git::FileStatus) -> Color32 {
+    use crate::git::FileStatus::*;
+    match (status, p.dark) {
+        (Modified | Renamed, true) => Color32::from_rgb(0xe2, 0xc0, 0x8d),
+        (Modified | Renamed, false) => Color32::from_rgb(0x89, 0x55, 0x03),
+        (Added | Untracked, true) => Color32::from_rgb(0x73, 0xc9, 0x91),
+        (Added | Untracked, false) => Color32::from_rgb(0x58, 0x7c, 0x0c),
+        (Deleted | Conflict, true) => Color32::from_rgb(0xe5, 0x6b, 0x6b),
+        (Deleted | Conflict, false) => Color32::from_rgb(0xad, 0x07, 0x07),
+    }
+}
+
+/// Gutter bar colors: added, modified, deleted.
+pub const GUTTER_ADDED: Color32 = Color32::from_rgb(0x2e, 0xa0, 0x43);
+pub const GUTTER_MODIFIED: Color32 = Color32::from_rgb(0x0c, 0x7d, 0x9d);
+pub const GUTTER_DELETED: Color32 = Color32::from_rgb(0xf8, 0x51, 0x49);
+
 pub fn severity_color(p: &Palette, s: crate::diagnostics::Severity) -> Color32 {
     match s {
         crate::diagnostics::Severity::Error => p.error,

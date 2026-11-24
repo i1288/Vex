@@ -6,6 +6,7 @@ mod buffer;
 mod commands;
 mod diagnostics;
 mod explorer;
+mod git;
 mod icons;
 mod keymap;
 mod keys_panel;

@@ -245,3 +245,16 @@ pub fn highlighted_job(text: &str, hits: &[usize], font: FontId, normal: Color32
     }
     job
 }
+
+/// A git branch: a line between two rings, with a third ring branching off.
+pub fn draw_branch_icon(p: &Painter, c: egui::Pos2, color: Color32) {
+    let st = Stroke::new(1.1, color);
+    let r = 1.8;
+    let (top, bottom, side) = (pos2(c.x - 3.0, c.y - 4.5), pos2(c.x - 3.0, c.y + 4.5), pos2(c.x + 3.0, c.y - 4.5));
+    for ring in [top, bottom, side] {
+        p.circle_stroke(ring, r, st);
+    }
+    p.line_segment([top + vec2(0.0, r), bottom - vec2(0.0, r)], st);
+    let bend = pos2(side.x, c.y - 0.5);
+    p.add(Shape::line(vec![side + vec2(0.0, r), bend, pos2(top.x + 0.5, c.y + 2.5)], st));
+}

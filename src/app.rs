@@ -13,6 +13,7 @@ use crate::commands::{self, Command, Keybindings};
 use crate::diagnostics::{Checker, Grammar, Severity};
 use crate::lsp;
 use crate::explorer::{self, Explorer};
+use crate::git::{self, Git, Repo};
 use crate::icons::*;
 use crate::keymap::{self, MapMode, Mapping, Origin};
 use crate::keys_panel::KeysPanel;
@@ -81,6 +82,13 @@ pub struct VexApp {
     checker: Checker,
     /// Language servers, for type checking.
     lsp: lsp::Manager,
+    git: Git,
+    /// Status of the project's git repository, once known (None: not a repo).
+    repo: Option<Repo>,
+    /// When git status was last asked for.
+    git_checked_at: f64,
+    /// Whether the window had focus last frame (coming back refreshes git).
+    window_focused: bool,
     /// What each language server is busy with, like "Indexing 40%".
     lsp_progress: std::collections::BTreeMap<String, String>,
     /// The language-server settings the servers were started with.
@@ -136,6 +144,13 @@ impl VexApp {
                 let ctx = cc.egui_ctx.clone();
                 lsp::Manager::new(move || ctx.request_repaint())
             },
+            git: {
+                let ctx = cc.egui_ctx.clone();
+                Git::new(move || ctx.request_repaint())
+            },
+            repo: None,
+            git_checked_at: f64::NEG_INFINITY,
+            window_focused: true,
             lsp_progress: Default::default(),
             applied_lsp: None,
             keys: Keybindings::default(),
@@ -640,6 +655,7 @@ impl VexApp {
                 self.info(msg);
                 self.lsp.did_save(id);
                 self.explorer.refresh();
+                self.git_checked_at = f64::NEG_INFINITY; // the file's status may have changed
                 if is_settings && self.reload_settings(&self.ctx.clone()) {
                     self.info("Settings applied");
                 }
@@ -806,6 +822,59 @@ impl VexApp {
 
     /// Collect finished syntax checks and language-server results, and send
     /// changed files to both once typing pauses.
+    /// Keep git status and the gutter's changed lines up to date.
+    fn update_git(&mut self, ctx: &egui::Context) {
+        const STATUS_EVERY: f64 = 4.0;
+        let (now, focused) = ctx.input(|i| (i.time, i.focused));
+        // Coming back to the window: maybe something was committed meanwhile.
+        if focused && !self.window_focused {
+            self.git_checked_at = f64::NEG_INFINITY;
+        }
+        self.window_focused = focused;
+        if now - self.git_checked_at >= STATUS_EVERY {
+            self.git_checked_at = now;
+            self.git.refresh_status(&self.explorer.root);
+        }
+        for done in self.git.results().collect::<Vec<_>>() {
+            match done {
+                git::Done::Status(repo) => {
+                    let new_head = repo.as_ref().map(|r| &r.head) != self.repo.as_ref().map(|r| &r.head);
+                    if new_head {
+                        for buf in &mut self.ws.buffers {
+                            buf.git_version = None; // diff again against the new HEAD
+                        }
+                    }
+                    if repo.is_none() {
+                        for buf in &mut self.ws.buffers {
+                            buf.git_changes.clear();
+                        }
+                    }
+                    self.repo = repo;
+                }
+                git::Done::Diff { id, version, changes } => {
+                    if let Some(buf) = self.ws.buffers.iter_mut().find(|b| b.id == id && b.version == version) {
+                        buf.git_changes = changes;
+                    }
+                }
+            }
+        }
+        if self.repo.is_none() {
+            return;
+        }
+        let paused = now - self.last_input >= 0.15;
+        for buf in &mut self.ws.buffers {
+            // Files outside the repository come back with no changes (and are
+            // only asked about once).
+            let Some(path) = &buf.path else { continue };
+            if buf.git_version == Some(buf.version) || (buf.git_version.is_some() && !paused) {
+                continue;
+            }
+            buf.git_version = Some(buf.version);
+            let lines = buf.lines.iter().map(|l| l.iter().collect()).collect();
+            self.git.diff(buf.id, buf.version, path, lines);
+        }
+    }
+
     fn update_diagnostics(&mut self, ctx: &egui::Context) {
         const PAUSE: f64 = 0.15;
         let idle = ctx.input(|i| i.time) - self.last_input;
@@ -1233,6 +1302,11 @@ impl VexApp {
         let collapse = Rect::from_center_size(pos2(r.right() - 48.0, r.center().y), vec2(22.0, 22.0));
         if header_button(ui, refresh, "explorer-refresh", "Refresh", draw_refresh_icon) {
             self.explorer.refresh();
+            self.git.forget_head();
+            self.git_checked_at = f64::NEG_INFINITY;
+            for buf in &mut self.ws.buffers {
+                buf.git_version = None;
+            }
         }
         if header_button(ui, collapse, "explorer-collapse", "Collapse Folders", draw_collapse_icon) {
             self.explorer.collapse_all();
@@ -1277,8 +1351,29 @@ impl VexApp {
                 } else {
                     draw_file_icon(painter, pos2(x + 23.0, r.center().y), theme::file_color(&row.entry.name));
                 }
-                let color = if is_active { p.text_bright } else { p.text_ui };
-                painter.text(pos2(x + 35.0, r.center().y), Align2::LEFT_CENTER, &row.entry.name, FontId::proportional(UI_SIZE), color);
+                // Git status: the name in the status color, and a letter (or a
+                // dot, for a folder with changes inside) at the right.
+                let status = self.repo.as_ref().and_then(|repo| {
+                    if row.entry.is_dir { repo.folders.get(&row.entry.path) } else { repo.files.get(&row.entry.path) }.copied()
+                });
+                let color = match status {
+                    Some(st) => theme::git_color(&p, st),
+                    None if is_active => p.text_bright,
+                    None => p.text_ui,
+                };
+                let mut name_right = r.right() - 10.0;
+                if let Some(st) = status {
+                    let c = theme::git_color(&p, st);
+                    if row.entry.is_dir {
+                        painter.circle_filled(pos2(r.right() - 18.0, r.center().y), 3.0, c.gamma_multiply(0.8));
+                    } else {
+                        painter.text(pos2(r.right() - 18.0, r.center().y), Align2::CENTER_CENTER, st.letter(), FontId::proportional(12.0), c);
+                    }
+                    name_right = r.right() - 30.0;
+                }
+                let name = painter.layout_no_wrap(row.entry.name.clone(), FontId::proportional(UI_SIZE), color);
+                let clip = Rect::from_min_max(pos2(x + 35.0, r.top()), pos2(name_right, r.bottom()));
+                painter.with_clip_rect(clip).galley(pos2(x + 35.0, r.center().y - name.size().y / 2.0), name, color);
                 if resp.clicked() {
                     clicked = Some((row.entry.path.clone(), row.entry.is_dir));
                 }
@@ -1457,6 +1552,19 @@ impl VexApp {
         painter.rect_filled(badge, CornerRadius::same(4), badge_color);
         painter.galley(badge.center() - label.size() / 2.0, label, white);
         let mut x = badge.right() + 10.0;
+        // The git branch, with commits to push / pull.
+        if let Some(repo) = self.repo.as_ref().filter(|r| !r.branch.is_empty()) {
+            let mut text = repo.branch.clone();
+            if repo.ahead > 0 {
+                text.push_str(&format!(" ↑{}", repo.ahead));
+            }
+            if repo.behind > 0 {
+                text.push_str(&format!(" ↓{}", repo.behind));
+            }
+            draw_branch_icon(painter, pos2(x + 5.0, rect.center().y), fg);
+            let r = painter.text(pos2(x + 14.0, rect.center().y), Align2::LEFT_CENTER, text, font.clone(), fg);
+            x = r.right() + 14.0;
+        }
         if let Some(name) = self.ws.current_buf().map(|b| b.name()) {
             let r = painter.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, name, font.clone(), fg);
             x = r.right() + 14.0;
@@ -1942,6 +2050,7 @@ impl eframe::App for VexApp {
         self.check_mapping_timeout(&ctx);
         self.auto_save(&ctx);
         self.update_diagnostics(&ctx);
+        self.update_git(&ctx);
         self.handle_close_request(&ctx);
         self.update_title(&ctx);
 

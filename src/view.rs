@@ -5,6 +5,7 @@ use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, CornerRadius, FontId, Rect, Response, Sense, Stroke, Ui};
 
 use crate::buffer::{tab_size, Buffer, Pos};
+use crate::git::LineChange;
 use crate::settings::Settings;
 use crate::syntax;
 use crate::theme;
@@ -433,6 +434,37 @@ impl View<'_> {
             }
         }
 
+        // Git changes since the last commit: bars between the numbers and the text.
+        let bar_x = rect.left() + gutter_w - if show_numbers { 13.0 } else { 9.0 };
+        let gutter_painter = painter.with_clip_rect(Rect::from_min_max(rect.min, pos2(text_rect.left(), rect.bottom())));
+        let last_line = line_of_row(last_row.min(rows.saturating_sub(1)));
+        for change in &buf.git_changes {
+            let (start, end, color) = match *change {
+                LineChange::Added { start, end } => (start, end, theme::GUTTER_ADDED),
+                LineChange::Modified { start, end } => (start, end, theme::GUTTER_MODIFIED),
+                LineChange::Deleted { at } => {
+                    if (first_line..=last_line + 1).contains(&at) {
+                        // A small wedge on the line boundary where lines went.
+                        let y = if at < buf.line_count() { row_y(row_of_line[at]) } else { row_y(rows) };
+                        let tip = pos2(bar_x + 5.0, y);
+                        gutter_painter.add(egui::Shape::convex_polygon(
+                            vec![pos2(bar_x - 1.0, y - 4.0), tip, pos2(bar_x - 1.0, y + 4.0)],
+                            theme::GUTTER_DELETED,
+                            Stroke::NONE,
+                        ));
+                    }
+                    continue;
+                }
+            };
+            let (start, end) = (start.max(first_line), end.min(last_line + 1).min(buf.line_count()));
+            if start >= end {
+                continue;
+            }
+            let top = row_y(row_of_line[start]);
+            let bottom = row_y(row_of_line[end]);
+            gutter_painter.rect_filled(Rect::from_x_y_ranges(bar_x..=bar_x + 3.0, top + 1.0..=bottom - 1.0), CornerRadius::same(1), color);
+        }
+
         // Vertical scrollbar with a cursor marker, like VS Code's overview ruler.
         let total = max_scroll + rect.height();
         if total > rect.height() + 1.0 {
@@ -451,6 +483,17 @@ impl View<'_> {
             let alpha = if active { 0x99 } else { 0x55 };
             let sb = p.scrollbar;
             painter.rect_filled(thumb, CornerRadius::same((width / 2.0) as u8), Color32::from_rgba_unmultiplied(sb.r(), sb.g(), sb.b(), alpha));
+            // Git changes as ticks along the track's left edge.
+            for change in &buf.git_changes {
+                let (start, end, color) = match *change {
+                    LineChange::Added { start, end } => (start, end, theme::GUTTER_ADDED),
+                    LineChange::Modified { start, end } => (start, end, theme::GUTTER_MODIFIED),
+                    LineChange::Deleted { at } => (at.min(buf.line_count() - 1), at.min(buf.line_count() - 1) + 1, theme::GUTTER_DELETED),
+                };
+                let y0 = rect.top() + row_of_line[start] as f32 / rows.max(1) as f32 * rect.height();
+                let y1 = rect.top() + row_of_line[end.min(buf.line_count())] as f32 / rows.max(1) as f32 * rect.height();
+                painter.rect_filled(Rect::from_x_y_ranges(track.left() + 1.0..=track.left() + 3.0, y0..=y1.max(y0 + 2.0)), 0.0, color);
+            }
             let cur_row = row_of_line[c.line] + cur_row_in_line;
             let my = rect.top() + cur_row as f32 / rows.max(1) as f32 * rect.height();
             painter.rect_filled(Rect::from_min_size(pos2(track.right() - 12.0, my), vec2(9.0, 2.0)), CornerRadius::same(1), p.cursor);
