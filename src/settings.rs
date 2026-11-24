@@ -52,6 +52,8 @@ pub struct Settings {
     pub auto_save: bool,
     pub auto_save_delay_ms: u64,
     pub trim_trailing_whitespace: bool,
+    /// Reopen the files that were open last time in this folder.
+    pub restore_session: bool,
     // Terminal
     /// 0 means the editor font size.
     pub terminal_font_size: f32,
@@ -95,6 +97,7 @@ impl Default for Settings {
             auto_save: false,
             auto_save_delay_ms: 1000,
             trim_trailing_whitespace: false,
+            restore_session: true,
             terminal_font_size: 0.0,
             terminal_shell: String::new(),
             language_servers: BTreeMap::new(),
@@ -235,6 +238,7 @@ impl Settings {
             ("Save files automatically after you stop typing", format!("auto_save = {}", b(self.auto_save))),
             ("How long to wait before auto-saving, in milliseconds", format!("auto_save_delay_ms = {}", self.auto_save_delay_ms)),
             ("Remove spaces at the ends of lines when saving", format!("trim_trailing_whitespace = {}", b(self.trim_trailing_whitespace))),
+            ("Reopen the files that were open last time in a folder", format!("restore_session = {}", b(self.restore_session))),
         ];
         flush(&mut out, &mut lines);
         out.push_str("\n# ---- Terminal ----\n");

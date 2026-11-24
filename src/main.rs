@@ -13,6 +13,7 @@ mod keys_panel;
 mod lsp;
 mod palette;
 mod search;
+mod session;
 mod settings;
 mod settings_page;
 mod snapshot;

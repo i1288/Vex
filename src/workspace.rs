@@ -7,6 +7,8 @@
 
 use std::path::Path;
 
+use crate::session::{GroupState, Session, TabState};
+
 use crate::buffer::{Buffer, Pos};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -92,6 +94,74 @@ impl Workspace {
         if let Some(t) = g.tabs.get(g.active) {
             t.view.put(&mut self.buffers[t.buf], true);
         }
+    }
+
+    /// The open tabs, for saving the session.
+    pub fn session(&mut self) -> Session {
+        self.store();
+        let groups = self
+            .groups
+            .iter()
+            .map(|g| {
+                // Unnamed buffers can't be reopened; keep the active tab pointing at the same file.
+                let tabs: Vec<(usize, &Tab)> = g.tabs.iter().enumerate().filter(|(_, t)| self.buffers[t.buf].path.is_some()).collect();
+                let active = tabs.iter().position(|(i, _)| *i == g.active).unwrap_or(0);
+                let tabs = tabs
+                    .into_iter()
+                    .map(|(_, t)| TabState {
+                        path: self.buffers[t.buf].path.clone().expect("filtered above"),
+                        line: t.view.cursor.line,
+                        col: t.view.cursor.col,
+                        scroll: t.view.scroll_y,
+                    })
+                    .collect();
+                GroupState { active, tabs }
+            })
+            .collect();
+        Session { focus: self.focus, groups }
+    }
+
+    /// Reopen a saved session's files (those that still exist), replacing
+    /// the empty workspace the app starts with.
+    pub fn restore(&mut self, session: &Session) {
+        let mut groups = Vec::new();
+        for gs in &session.groups {
+            let mut g = Group::default();
+            for ts in &gs.tabs {
+                let b = match self.find(&ts.path) {
+                    Some(b) => b,
+                    // Files deleted since are left out.
+                    None if !ts.path.is_file() => continue,
+                    None => match Buffer::open(&ts.path) {
+                        Ok(buf) => {
+                            self.buffers.push(buf);
+                            self.buffers.len() - 1
+                        }
+                        Err(_) => continue,
+                    },
+                };
+                let view = ViewState { cursor: ts.pos(), want_col: ts.col, scroll_y: ts.scroll, scroll_x: 0.0 };
+                g.tabs.push(Tab { buf: b, view });
+            }
+            if !g.tabs.is_empty() {
+                g.active = gs.active.min(g.tabs.len() - 1);
+                groups.push(g);
+            }
+        }
+        if groups.is_empty() {
+            return;
+        }
+        self.focus = session.focus.min(groups.len() - 1);
+        self.groups = groups;
+        // Clamp every tab's cursor to its file as it is now.
+        for g in &mut self.groups {
+            for t in &mut g.tabs {
+                let buf = &mut self.buffers[t.buf];
+                let line = t.view.cursor.line.min(buf.line_count() - 1);
+                t.view.cursor = Pos::new(line, t.view.cursor.col.min(buf.line_len(line)));
+            }
+        }
+        self.load();
     }
 
     /// Show buffer `b` in the focused group, reusing its tab there if it has one.
@@ -268,6 +338,37 @@ mod tests {
             ws.add_buffer(b);
         }
         ws
+    }
+
+    #[test]
+    fn session_round_trip_restores_panes_and_cursors() {
+        let dir = std::env::temp_dir().join(format!("vex-session-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.txt"), dir.join("b.txt"));
+        std::fs::write(&a, "1\n2\n3\n4\n").unwrap();
+        std::fs::write(&b, "x\ny\n").unwrap();
+
+        let mut ws = Workspace::default();
+        ws.add_buffer(Buffer::open(&a).unwrap());
+        ws.current_buf_mut().unwrap().cursor = Pos::new(2, 0);
+        ws.add_buffer(Buffer::open(&b).unwrap());
+        ws.current_buf_mut().unwrap().cursor = Pos::new(1, 1);
+        ws.split();
+        ws.activate(1, 0);
+        ws.add_buffer(Buffer::from_str("unnamed")); // not saved: no file to reopen
+        ws.activate(1, 0);
+        let session = ws.session();
+        assert_eq!(session.groups.len(), 2);
+        assert_eq!(session.groups[1].tabs.len(), 1, "the unnamed buffer is left out");
+
+        std::fs::remove_file(&b).unwrap();
+        let mut restored = Workspace::default();
+        restored.restore(&session);
+        assert_eq!(restored.groups.len(), 1, "the pane whose only file is gone is dropped");
+        assert_eq!(restored.groups[0].tabs.len(), 1);
+        assert_eq!(restored.current_buf().unwrap().path.as_deref(), Some(a.as_path()));
+        assert_eq!(restored.current_buf().unwrap().cursor, Pos::new(2, 0));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -454,6 +454,9 @@ fn files(ui: &mut Ui, rows: &mut Rows, st: &mut Settings) -> bool {
     changed |= rows.row(ui, "Trim trailing whitespace", "Remove spaces and tabs at the ends of lines when saving.", |ui| {
         ui.checkbox(&mut st.trim_trailing_whitespace, "Trim on save").changed()
     });
+    changed |= rows.row(ui, "Restore open files", "Reopen the files you had open the last time you worked in this folder.", |ui| {
+        ui.checkbox(&mut st.restore_session, "Restore the previous session").changed()
+    });
     changed
 }
 

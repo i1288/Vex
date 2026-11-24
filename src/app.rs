@@ -19,6 +19,7 @@ use crate::keymap::{self, MapMode, Mapping, Origin};
 use crate::keys_panel::KeysPanel;
 use crate::palette::{self as cmd_palette, Palette};
 use crate::search::SearchView;
+use crate::session;
 use crate::settings::{self, Settings};
 use crate::settings_page::SettingsPage;
 use crate::syntax;
@@ -172,6 +173,17 @@ impl VexApp {
         app.load_init_script();
         if let Some(f) = file {
             app.open(&f);
+        } else if app.settings.restore_session {
+            if let Some(s) = session::load(&app.explorer.root) {
+                app.ws.restore(&s);
+                for g in &app.ws.groups {
+                    for t in &g.tabs {
+                        if let Some(p) = &app.ws.buffers[t.buf].path {
+                            app.explorer.reveal(p);
+                        }
+                    }
+                }
+            }
         }
         app
     }
@@ -2176,6 +2188,16 @@ impl VexApp {
 }
 
 impl eframe::App for VexApp {
+    fn on_exit(&mut self) {
+        // Remember the open files for next time (not for test snapshots).
+        if self.settings.restore_session && self.snapshot.is_none() {
+            let s = self.ws.session();
+            if let Err(e) = session::save(&self.explorer.root, &s) {
+                eprintln!("vex: could not save the session: {e}");
+            }
+        }
+    }
+
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         if let Some(s) = &mut self.snapshot {
             raw_input.events.extend(s.take_events());
