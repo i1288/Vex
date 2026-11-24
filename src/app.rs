@@ -16,6 +16,7 @@ use crate::explorer::{self, Explorer};
 use crate::icons::*;
 use crate::keymap::{self, MapMode, Mapping, Origin};
 use crate::keys_panel::KeysPanel;
+use crate::palette::{self as cmd_palette, Palette};
 use crate::search::SearchView;
 use crate::settings::{self, Settings};
 use crate::settings_page::SettingsPage;
@@ -54,6 +55,9 @@ pub struct VexApp {
     settings: Settings,
     ctx: egui::Context,
     quick_open: Option<QuickOpen>,
+    palette: Option<Palette>,
+    /// Palette entries run lately, newest first.
+    palette_recent: Vec<String>,
     drag_anchor: Option<Pos>,
     follow_cursor: bool,
     /// Center the cursor line on the next frame (after jumping to it).
@@ -108,6 +112,8 @@ impl VexApp {
             settings: Settings::default(),
             ctx: cc.egui_ctx.clone(),
             quick_open: None,
+            palette: None,
+            palette_recent: Vec::new(),
             drag_anchor: None,
             follow_cursor: true,
             center_cursor: false,
@@ -394,7 +400,18 @@ impl VexApp {
                 self.vim.mode = Mode::Command;
                 self.vim.cmdline.clear();
             }
+            Command::CommandPalette => {
+                self.quick_open = None;
+                self.palette = match self.palette {
+                    Some(_) => None,
+                    None => {
+                        self.terminal_focused = false;
+                        Some(Palette::new(self.palette_entries(), self.palette_recent.clone()))
+                    }
+                };
+            }
             Command::QuickOpen => {
+                self.palette = None;
                 self.quick_open = match self.quick_open {
                     Some(_) => None,
                     None => Some(QuickOpen {
@@ -429,6 +446,96 @@ impl VexApp {
             }
         }
         ctx.request_repaint();
+    }
+
+    /// Whether Go to File or the command palette is up (they take the keys).
+    fn overlay_open(&self) -> bool {
+        self.quick_open.is_some() || self.palette.is_some()
+    }
+
+    fn palette_entries(&self) -> Vec<cmd_palette::Entry> {
+        use cmd_palette::{Entry, Item};
+        let mut out: Vec<Entry> = commands::COMMANDS
+            .iter()
+            .filter(|i| !matches!(i.command, Command::CommandPalette))
+            .map(|i| {
+                let label = self.keys.label(i.command);
+                Entry { title: i.title.to_string(), detail: if label == "—" { String::new() } else { label }, item: Item::Command(i.command) }
+            })
+            .collect();
+        let extra: [(&str, Item); 13] = [
+            ("Color Theme", Item::ThemePicker),
+            ("Open Settings File (settings.toml)", Item::OpenSettingsFile),
+            ("Open Startup Script (init.vex)", Item::OpenInitScript),
+            ("Save All Files", Item::Ex("wa")),
+            ("Close Editor", Item::Ex("q")),
+            ("Close Other Panes", Item::Ex("only")),
+            ("Reveal Active File in Explorer", Item::RevealInExplorer),
+            ("Toggle Line Numbers", Item::Ex("set number!")),
+            ("Toggle Relative Line Numbers", Item::Ex("set relativenumber!")),
+            ("Toggle Indent Guides", Item::Ex("set indentguides!")),
+            ("Toggle Breadcrumbs", Item::Ex("set breadcrumbs!")),
+            ("Toggle Current Line Highlight", Item::Ex("set cursorline!")),
+            ("Clear Search Highlight", Item::Ex("noh")),
+        ];
+        out.extend(extra.into_iter().map(|(t, item)| Entry { title: t.to_string(), detail: String::new(), item }));
+        out
+    }
+
+    fn palette_overlay(&mut self, ctx: &egui::Context) {
+        use cmd_palette::Item;
+        let Some(palette) = &mut self.palette else { return };
+        let out = palette.show(ctx);
+        if palette.theme_before.is_none() {
+            self.palette_recent = palette.recent().to_vec();
+        }
+        if let Some(name) = out.preview_theme {
+            self.settings.theme = name;
+            self.apply_settings(ctx);
+        }
+        if out.close {
+            self.palette = None;
+        }
+        match out.run {
+            Some(Item::Command(c)) => self.run_command(ctx, c),
+            Some(Item::Ex(line)) => {
+                self.run_ex(ctx, line);
+                // Toggles from the palette last, like changes in the Settings page.
+                if line.starts_with("set ") {
+                    self.settings_dirty_at = Some(ctx.input(|i| i.time));
+                }
+            }
+            Some(Item::ThemePicker) => self.palette = Some(Palette::themes(&self.settings.theme)),
+            Some(Item::Theme(name)) => {
+                self.settings.theme = name;
+                self.apply_settings(ctx);
+                self.settings_dirty_at = Some(ctx.input(|i| i.time));
+            }
+            Some(Item::OpenSettingsFile) => self.open_settings(),
+            Some(Item::OpenInitScript) => self.open_init_script(),
+            Some(Item::RevealInExplorer) => {
+                if let Some(path) = self.ws.current_buf().and_then(|b| b.path.clone()) {
+                    self.explorer.reveal(&path);
+                    self.show_sidebar = true;
+                    self.sidebar_view = SidebarView::Explorer;
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Run a `:` command line as if it were typed.
+    fn run_ex(&mut self, ctx: &egui::Context, line: &str) {
+        let buf = match self.ws.current() {
+            Some(b) => &mut self.ws.buffers[b],
+            None => &mut self.scratch,
+        };
+        match self.vim.execute(buf, line) {
+            Ok(Some(action)) => self.handle_action(ctx, action),
+            Ok(None) => {}
+            Err(e) => self.error(e),
+        }
+        self.follow_cursor = true;
     }
 
     fn info(&mut self, msg: impl Into<String>) {
@@ -851,7 +958,7 @@ impl VexApp {
 
     /// Keys go to the terminal when its panel is open and focused.
     fn terminal_has_keys(&self) -> bool {
-        self.show_terminal && self.terminal_focused && self.terminal.is_some() && self.quick_open.is_none()
+        self.show_terminal && self.terminal_focused && self.terminal.is_some() && !self.overlay_open()
     }
 
     fn toggle_terminal(&mut self) {
@@ -918,7 +1025,7 @@ impl VexApp {
                         self.run_command(ctx, c);
                         continue;
                     }
-                    if self.quick_open.is_some() {
+                    if self.overlay_open() {
                         continue;
                     }
                     // With key positions on, vim commands follow where a key sits on a
@@ -968,7 +1075,7 @@ impl VexApp {
                         self.feed(ctx, k);
                     }
                 }
-                egui::Event::Text(t) if self.quick_open.is_none() => {
+                egui::Event::Text(t) if !self.overlay_open() => {
                     if self.skip_text > 0 {
                         self.skip_text -= 1;
                         continue;
@@ -978,11 +1085,11 @@ impl VexApp {
                     }
                 }
                 // Ctrl+C: copy the selection in visual mode, otherwise act like Esc (as in vim).
-                egui::Event::Copy if self.quick_open.is_none() => {
+                egui::Event::Copy if !self.overlay_open() => {
                     let key = if matches!(self.vim.mode, Mode::Visual | Mode::VisualLine) { Key::Char('y') } else { Key::Esc };
                     self.feed(ctx, key);
                 }
-                egui::Event::Paste(t) if self.quick_open.is_none() => {
+                egui::Event::Paste(t) if !self.overlay_open() => {
                     let buf = match self.ws.current() {
                         Some(b) => &mut self.ws.buffers[b],
                         None => &mut self.scratch,
@@ -1874,6 +1981,7 @@ impl eframe::App for VexApp {
         self.save_settings_if_idle(&ctx);
 
         self.quick_open_overlay(&ctx);
+        self.palette_overlay(&ctx);
         self.cmdline_overlay(&ctx);
         if let Some(panel) = &mut self.keys_panel {
             let script_maps: Vec<Mapping> =
@@ -1892,7 +2000,7 @@ impl eframe::App for VexApp {
 
         // Keep egui widgets from holding keyboard focus; keys belong to the editor.
         let typing = self.search.has_focus || self.search.focus_requested;
-        if self.quick_open.is_none() && self.keys_panel.is_none() && self.settings_page.is_none() && !typing {
+        if !self.overlay_open() && self.keys_panel.is_none() && self.settings_page.is_none() && !typing {
             if let Some(id) = ctx.memory(|m| m.focused()) {
                 ctx.memory_mut(|m| m.surrender_focus(id));
             }
@@ -1906,30 +2014,10 @@ fn galley(ctx: &egui::Context, text: impl Into<String>, size: f32, color: Color3
     ctx.fonts_mut(|f| f.layout_no_wrap(text.into(), FontId::proportional(size), color))
 }
 
-fn overlay_frame(ctx: &egui::Context, id: &str, add: impl FnOnce(&mut Ui)) {
-    let width = (ctx.content_rect().width() * 0.6).clamp(320.0, 620.0);
-    egui::Area::new(egui::Id::unique(id))
-        .anchor(Align2::CENTER_TOP, vec2(0.0, 8.0))
-        .order(egui::Order::Foreground)
-        .fade_in(false)
-        .show(ctx, |ui| {
-            Frame::NONE
-                .fill(theme::p().widget_bg)
-                .stroke(Stroke::new(1.0, theme::p().border))
-                .corner_radius(8)
-                .inner_margin(6)
-                .shadow(egui::Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(140) })
-                .show(ui, |ui| {
-                    ui.set_width(width);
-                    add(ui);
-                });
-        });
-}
-
 fn draw_welcome(p: &Painter, rect: Rect, logo: &egui::TextureHandle, keys: &Keybindings) {
     let c = rect.center();
     let pal = theme::p();
-    let logo_rect = Rect::from_center_size(pos2(c.x, c.y - 150.0), vec2(104.0, 104.0));
+    let logo_rect = Rect::from_center_size(pos2(c.x, c.y - 170.0), vec2(104.0, 104.0));
     let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
     p.image(logo.id(), logo_rect, uv, Color32::WHITE);
     p.text(pos2(c.x, logo_rect.bottom() + 22.0), Align2::CENTER_CENTER, "Vex", FontId::proportional(24.0), pal.text_bright);
@@ -1941,7 +2029,9 @@ fn draw_welcome(p: &Painter, rect: Rect, logo: &egui::TextureHandle, keys: &Keyb
         pal.text_muted,
     );
     let rows = [
+        ("Show All Commands", keys.label(Command::CommandPalette)),
         ("Go to File", keys.label(Command::QuickOpen)),
+        ("Search in Files", keys.label(Command::FindInFiles)),
         ("Command Line", ":".into()),
         ("Open File", ":e <path>".into()),
         ("Toggle Sidebar", keys.label(Command::ToggleSidebar)),
@@ -1950,7 +2040,7 @@ fn draw_welcome(p: &Painter, rect: Rect, logo: &egui::TextureHandle, keys: &Keyb
         ("Save", format!(":w  /  {}", keys.label(Command::Save))),
     ];
     for (i, (label, keys)) in rows.iter().enumerate() {
-        let y = c.y + 4.0 + i as f32 * 30.0;
+        let y = c.y - 16.0 + i as f32 * 30.0;
         p.text(pos2(c.x - 12.0, y), Align2::RIGHT_CENTER, *label, FontId::proportional(13.0), pal.text_muted);
         // Each key combination as keycaps: "Ctrl+P" → [Ctrl] [P].
         let mut x = c.x + 12.0;

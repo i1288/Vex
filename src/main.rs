@@ -10,6 +10,7 @@ mod icons;
 mod keymap;
 mod keys_panel;
 mod lsp;
+mod palette;
 mod search;
 mod settings;
 mod settings_page;

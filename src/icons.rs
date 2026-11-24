@@ -1,6 +1,6 @@
 //! Small vector icons drawn with the painter, in the style of VS Code's codicons.
 
-use eframe::egui::{self, pos2, vec2, Color32, CornerRadius, Painter, Rect, Sense, Shape, Stroke, Ui};
+use eframe::egui::{self, pos2, vec2, Align2, Color32, CornerRadius, FontId, Frame, Painter, Rect, Sense, Shape, Stroke, Ui};
 
 use crate::theme;
 
@@ -191,4 +191,57 @@ pub fn header_button(ui: &Ui, r: Rect, id: &str, tip: &str, draw: fn(&Painter, e
     }
     draw(ui.painter(), r.center(), if resp.hovered() { p.text_bright } else { p.text_muted });
     resp.on_hover_text(tip).clicked()
+}
+
+/// A floating box at the top of the window (Go to File, the command palette).
+pub fn overlay_frame(ctx: &egui::Context, id: &str, add: impl FnOnce(&mut Ui)) {
+    let width = (ctx.content_rect().width() * 0.6).clamp(320.0, 620.0);
+    egui::Area::new(egui::Id::unique(id))
+        .anchor(Align2::CENTER_TOP, vec2(0.0, 8.0))
+        .order(egui::Order::Foreground)
+        .fade_in(false)
+        .show(ctx, |ui| {
+            Frame::NONE
+                .fill(theme::p().widget_bg)
+                .stroke(Stroke::new(1.0, theme::p().border))
+                .corner_radius(8)
+                .inner_margin(6)
+                .shadow(egui::Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(140) })
+                .show(ui, |ui| {
+                    ui.set_width(width);
+                    add(ui);
+                });
+        });
+}
+
+/// A key combination as keycaps ("Ctrl+Shift+P" → [Ctrl] [Shift] [P]),
+/// right-aligned to `right`. Returns the left edge.
+pub fn keycaps_right(p: &Painter, right: f32, y: f32, label: &str, color: Color32) -> f32 {
+    let pal = theme::p();
+    let caps: Vec<&str> = if label.len() > 1 && label.contains('+') && !label.ends_with('+') { label.split('+').collect() } else { vec![label] };
+    let mut x = right;
+    for cap in caps.iter().rev() {
+        let g = p.layout_no_wrap(cap.to_string(), FontId::proportional(11.0), color);
+        let chip = Rect::from_min_max(pos2(x - g.size().x - 10.0, y - 9.0), pos2(x, y + 9.0));
+        p.rect(chip, CornerRadius::same(4), pal.input_bg, Stroke::new(1.0, pal.border), egui::StrokeKind::Inside);
+        p.galley(chip.center() - g.size() / 2.0, g, color);
+        x = chip.left() - 3.0;
+    }
+    x
+}
+
+/// `text` with the chars at `hits` drawn brighter, for fuzzy-match results.
+pub fn highlighted_job(text: &str, hits: &[usize], font: FontId, normal: Color32, bright: Color32) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    for (i, c) in text.chars().enumerate() {
+        let hit = hits.contains(&i);
+        let format = egui::TextFormat {
+            font_id: font.clone(),
+            color: if hit { bright } else { normal },
+            underline: if hit { Stroke::new(1.0, bright.gamma_multiply(0.6)) } else { Stroke::NONE },
+            ..Default::default()
+        };
+        job.append(&c.to_string(), 0.0, format);
+    }
+    job
 }
