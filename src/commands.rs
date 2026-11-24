@@ -35,6 +35,7 @@ pub enum Command {
     ZoomReset,
     OpenSettings,
     Keybindings,
+    FindInFiles,
     FocusPane(u8),
 }
 
@@ -63,6 +64,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     info(Command::CommandLine, "command_line", "Command Line", &["Cmd+Shift+P"], true),
     info(Command::Save, "save", "Save File", &["Cmd+S"], false),
     info(Command::ToggleSidebar, "toggle_sidebar", "Toggle Sidebar", &["Cmd+B"], true),
+    info(Command::FindInFiles, "find_in_files", "Search in Files", &["Cmd+Shift+F"], true),
     info(Command::ToggleTerminal, "toggle_terminal", "Toggle Terminal", &["Ctrl+`"], true),
     info(Command::ToggleWrap, "toggle_wrap", "Toggle Word Wrap", &["Alt+Z"], false),
     info(Command::ToggleMinimap, "toggle_minimap", "Toggle Minimap", &[], false),

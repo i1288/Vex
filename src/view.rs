@@ -104,6 +104,8 @@ pub struct View<'a> {
     pub focused: bool,
     /// Scroll so the cursor is visible.
     pub follow_cursor: bool,
+    /// Scroll so the cursor line is in the middle (after a jump).
+    pub center_cursor: bool,
     pub drag_anchor: &'a mut Option<Pos>,
     /// False during the "off" half of a cursor blink.
     pub cursor_visible: bool,
@@ -111,7 +113,7 @@ pub struct View<'a> {
 
 impl View<'_> {
     pub fn show(self, ui: &mut Ui, rect: Rect, id: egui::Id) -> Response {
-        let View { buf, vim, settings: st, focused, follow_cursor, drag_anchor, cursor_visible } = self;
+        let View { buf, vim, settings: st, focused, follow_cursor, center_cursor, drag_anchor, cursor_visible } = self;
         let resp = ui.interact(rect, id, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         let p = theme::p();
@@ -167,7 +169,9 @@ impl View<'_> {
         if follow_cursor {
             let so = (st.scroll_off as f32 * line_h).min(rect.height() / 3.0);
             let cy = (row_of_line[cur.line] + cur_row_in_line) as f32 * line_h;
-            if cy - so < buf.scroll_y {
+            if center_cursor {
+                buf.scroll_y = cy + line_h / 2.0 - rect.height() / 2.0;
+            } else if cy - so < buf.scroll_y {
                 buf.scroll_y = cy - so;
             } else if cy + line_h + so > buf.scroll_y + rect.height() {
                 buf.scroll_y = cy + line_h + so - rect.height();

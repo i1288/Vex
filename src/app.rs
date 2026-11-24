@@ -13,8 +13,10 @@ use crate::commands::{self, Command, Keybindings};
 use crate::diagnostics::{Checker, Grammar, Severity};
 use crate::lsp;
 use crate::explorer::{self, Explorer};
+use crate::icons::*;
 use crate::keymap::{self, MapMode, Mapping, Origin};
 use crate::keys_panel::KeysPanel;
+use crate::search::SearchView;
 use crate::settings::{self, Settings};
 use crate::settings_page::SettingsPage;
 use crate::syntax;
@@ -27,6 +29,12 @@ use crate::vim::{Action, Key, Mode, Vim};
 const UI_SIZE: f32 = 13.0;
 const TAB_GAP: f32 = 3.0;
 const TAB_RADIUS: u8 = 7;
+
+#[derive(Clone, Copy, PartialEq)]
+enum SidebarView {
+    Explorer,
+    Search,
+}
 
 struct QuickOpen {
     query: String,
@@ -41,11 +49,15 @@ pub struct VexApp {
     vim: Vim,
     explorer: Explorer,
     show_sidebar: bool,
+    sidebar_view: SidebarView,
+    search: SearchView,
     settings: Settings,
     ctx: egui::Context,
     quick_open: Option<QuickOpen>,
     drag_anchor: Option<Pos>,
     follow_cursor: bool,
+    /// Center the cursor line on the next frame (after jumping to it).
+    center_cursor: bool,
     title: String,
     allow_close: bool,
     snapshot: Option<crate::snapshot::Snapshot>,
@@ -88,11 +100,17 @@ impl VexApp {
             vim: Vim::default(),
             explorer: Explorer::new(root),
             show_sidebar: true,
+            sidebar_view: SidebarView::Explorer,
+            search: {
+                let ctx = cc.egui_ctx.clone();
+                SearchView::new(move || ctx.request_repaint())
+            },
             settings: Settings::default(),
             ctx: cc.egui_ctx.clone(),
             quick_open: None,
             drag_anchor: None,
             follow_cursor: true,
+            center_cursor: false,
             title: String::new(),
             allow_close: false,
             snapshot: crate::snapshot::Snapshot::from_env(),
@@ -387,6 +405,7 @@ impl VexApp {
                 };
             }
             Command::ToggleSidebar => self.show_sidebar = !self.show_sidebar,
+            Command::FindInFiles => self.show_search(),
             Command::ToggleTerminal => self.toggle_terminal(),
             Command::ToggleWrap => {
                 self.settings.word_wrap = !self.settings.word_wrap;
@@ -881,6 +900,18 @@ impl VexApp {
                 self.terminal_input(ctx, ev);
                 continue;
             }
+            // Typing in the Search box: only app shortcuts, and Esc to go back.
+            if self.search.has_focus {
+                if let egui::Event::Key { key, pressed: true, modifiers, .. } = ev {
+                    if key == EKey::Escape {
+                        self.search.has_focus = false;
+                        ctx.memory_mut(|m| m.stop_text_input());
+                    } else if let Some(c) = self.keys.lookup(key, modifiers) {
+                        self.run_command(ctx, c);
+                    }
+                }
+                continue;
+            }
             match ev {
                 egui::Event::Key { key, physical_key, pressed: true, modifiers, .. } => {
                     if let Some(c) = self.keys.lookup(key, modifiers) {
@@ -1003,17 +1034,23 @@ impl VexApp {
             .on_hover_text(format!("Vex {}", env!("CARGO_PKG_VERSION")));
 
         let item = |i: usize| Rect::from_min_size(pos2(rect.left(), logo_cell.bottom() + i as f32 * 46.0), vec2(48.0, 46.0));
-        let explorer = activity_item(ui, item(0), "act-explorer", self.show_sidebar, &p, draw_files_icon);
+        let explorer_on = self.show_sidebar && self.sidebar_view == SidebarView::Explorer;
+        let search_on = self.show_sidebar && self.sidebar_view == SidebarView::Search;
+        let explorer = activity_item(ui, item(0), "act-explorer", explorer_on, &p, draw_files_icon);
+        let search = activity_item(ui, item(1), "act-search", search_on, &p, draw_search_icon);
         if explorer.clicked() {
-            self.show_sidebar = !self.show_sidebar;
+            self.show_sidebar = !explorer_on;
+            self.sidebar_view = SidebarView::Explorer;
+        }
+        if search.clicked() {
+            if search_on {
+                self.show_sidebar = false;
+            } else {
+                self.show_search();
+            }
         }
         explorer.on_hover_text(format!("Explorer ({})", self.keys.label(Command::ToggleSidebar)));
-
-        let search = activity_item(ui, item(1), "act-search", self.quick_open.is_some(), &p, draw_search_icon);
-        if search.clicked() {
-            self.run_command(&ui.ctx().clone(), Command::QuickOpen);
-        }
-        search.on_hover_text(format!("Go to File ({})", self.keys.label(Command::QuickOpen)));
+        search.on_hover_text(format!("Search ({})", self.keys.label(Command::FindInFiles)));
 
         // Bottom: the gear, like VS Code's Manage button.
         let r = Rect::from_min_size(pos2(rect.left(), rect.bottom() - 50.0), vec2(48.0, 46.0));
@@ -1029,29 +1066,69 @@ impl VexApp {
     }
 
     fn sidebar(&mut self, ui: &mut Ui) {
-        let p = theme::p();
-        let w = ui.available_width();
-        let (r, _) = ui.allocate_exact_size(vec2(w, 35.0), Sense::hover());
-        ui.painter().text(r.left_center() + vec2(20.0, 0.0), Align2::LEFT_CENTER, "EXPLORER", FontId::proportional(11.0), p.text_ui);
-        // Header actions, right-aligned.
-        let refresh = Rect::from_center_size(pos2(r.right() - 22.0, r.center().y), vec2(22.0, 22.0));
-        let collapse = Rect::from_center_size(pos2(r.right() - 48.0, r.center().y), vec2(22.0, 22.0));
-        for (rect, id, tip, draw) in [
-            (refresh, "explorer-refresh", "Refresh", draw_refresh_icon as fn(&Painter, egui::Pos2, Color32)),
-            (collapse, "explorer-collapse", "Collapse Folders", draw_collapse_icon),
-        ] {
-            let resp = ui.interact(rect, ui.scope_id().with(id), Sense::click());
-            if resp.hovered() {
-                ui.painter().rect_filled(rect, CornerRadius::same(5), p.list_hover);
-            }
-            draw(ui.painter(), rect.center(), if resp.hovered() { p.text_bright } else { p.text_muted });
-            if resp.on_hover_text(tip).clicked() {
-                if id == "explorer-refresh" {
-                    self.explorer.refresh();
-                } else {
-                    self.explorer.collapse_all();
+        match self.sidebar_view {
+            SidebarView::Explorer => self.explorer_view(ui),
+            SidebarView::Search => {
+                if let Some(jump) = self.search.show(ui, &self.explorer.root) {
+                    self.open_at(&self.explorer.root.join(&jump.path), jump.line, jump.col);
+                    // Highlight the matches in the editor too; n and N go through them.
+                    self.vim.search = Some(self.search.query.vim_pattern());
+                    self.vim.highlight_search = true;
+                    self.search.has_focus = false;
+                    ui.ctx().memory_mut(|m| m.stop_text_input());
                 }
             }
+        }
+    }
+
+    /// Open the Search view and put the cursor in its box, starting from the
+    /// selected text if there is some.
+    fn show_search(&mut self) {
+        self.show_sidebar = true;
+        self.sidebar_view = SidebarView::Search;
+        self.search.focus_requested = true;
+        self.terminal_focused = false;
+        if let Some(b) = self.ws.current() {
+            let buf = &self.ws.buffers[b];
+            if let Some((a, e)) = self.vim.selection(buf) {
+                if a.line == e.line && matches!(self.vim.mode, Mode::Visual) {
+                    self.search.query.text = buf.slice(a, e);
+                    self.search.query.text.push(buf.lines[e.line].get(e.col).copied().unwrap_or_default());
+                    self.search.query.text.retain(|c| c != '\0');
+                    self.vim.mode = Mode::Normal;
+                    self.search.start(&self.explorer.root);
+                }
+            }
+        }
+    }
+
+    /// Open `path` with the cursor at `line`, `col`.
+    fn open_at(&mut self, path: &Path, line: usize, col: usize) {
+        let target = self.resolve(path);
+        self.open(&target);
+        let Some(b) = self.ws.current() else { return };
+        let buf = &mut self.ws.buffers[b];
+        if buf.path.as_ref() != Some(&target) {
+            return; // it failed to open
+        }
+        let line = line.min(buf.lines.len().saturating_sub(1));
+        buf.cursor = Pos::new(line, col.min(buf.lines[line].len()));
+        buf.want_col = buf.cursor.col;
+        self.follow_cursor = true;
+        self.center_cursor = true;
+    }
+
+    fn explorer_view(&mut self, ui: &mut Ui) {
+        let p = theme::p();
+        let w = ui.available_width();
+        let r = sidebar_header(ui, "EXPLORER");
+        let refresh = Rect::from_center_size(pos2(r.right() - 22.0, r.center().y), vec2(22.0, 22.0));
+        let collapse = Rect::from_center_size(pos2(r.right() - 48.0, r.center().y), vec2(22.0, 22.0));
+        if header_button(ui, refresh, "explorer-refresh", "Refresh", draw_refresh_icon) {
+            self.explorer.refresh();
+        }
+        if header_button(ui, collapse, "explorer-collapse", "Collapse Folders", draw_collapse_icon) {
+            self.explorer.collapse_all();
         }
 
         let (r, _) = ui.allocate_exact_size(vec2(w, 24.0), Sense::hover());
@@ -1427,12 +1504,13 @@ impl VexApp {
             }
 
             let follow = g == self.ws.focus && std::mem::take(&mut self.follow_cursor);
+            let center = follow && std::mem::take(&mut self.center_cursor);
             let cursor_visible = self.cursor_blink_on(ui.ctx());
             let editor_focused = !(self.show_terminal && self.terminal_focused);
             let (vim, settings, drag) = (&mut self.vim, &self.settings, &mut self.drag_anchor);
             let resp = self.ws.with_view(g, |buf, focused| {
                 let focused = focused && editor_focused;
-                let view = View { buf, vim, settings, focused, follow_cursor: follow, drag_anchor: drag, cursor_visible };
+                let view = View { buf, vim, settings, focused, follow_cursor: follow, center_cursor: center, drag_anchor: drag, cursor_visible };
                 view.show(ui, body, ui.scope_id().with(("editor", g)))
             });
             match resp {
@@ -1813,7 +1891,8 @@ impl eframe::App for VexApp {
         }
 
         // Keep egui widgets from holding keyboard focus; keys belong to the editor.
-        if self.quick_open.is_none() && self.keys_panel.is_none() && self.settings_page.is_none() {
+        let typing = self.search.has_focus || self.search.focus_requested;
+        if self.quick_open.is_none() && self.keys_panel.is_none() && self.settings_page.is_none() && !typing {
             if let Some(id) = ctx.memory(|m| m.focused()) {
                 ctx.memory_mut(|m| m.surrender_focus(id));
             }
@@ -1845,176 +1924,6 @@ fn overlay_frame(ctx: &egui::Context, id: &str, add: impl FnOnce(&mut Ui)) {
                     add(ui);
                 });
         });
-}
-
-fn draw_chevron(p: &Painter, c: egui::Pos2, down: bool, color: Color32) {
-    let s = 3.5;
-    let pts = if down {
-        vec![pos2(c.x - s, c.y - s / 2.0), pos2(c.x, c.y + s / 2.0), pos2(c.x + s, c.y - s / 2.0)]
-    } else {
-        vec![pos2(c.x - s / 2.0, c.y - s), pos2(c.x + s / 2.0, c.y), pos2(c.x - s / 2.0, c.y + s)]
-    };
-    p.add(Shape::line(pts, Stroke::new(1.3, color)));
-}
-
-fn draw_x(p: &Painter, c: egui::Pos2, s: f32, color: Color32) {
-    let st = Stroke::new(1.2, color);
-    p.line_segment([pos2(c.x - s, c.y - s), pos2(c.x + s, c.y + s)], st);
-    p.line_segment([pos2(c.x + s, c.y - s), pos2(c.x - s, c.y + s)], st);
-}
-
-/// A small page with a folded corner.
-fn draw_file_icon(p: &Painter, c: egui::Pos2, color: Color32) {
-    let (w, h, f) = (9.0, 12.0, 3.0);
-    let (l, t) = (c.x - w / 2.0, c.y - h / 2.0);
-    let pts = vec![
-        pos2(l, t),
-        pos2(l + w - f, t),
-        pos2(l + w, t + f),
-        pos2(l + w, t + h),
-        pos2(l, t + h),
-    ];
-    p.add(Shape::convex_polygon(pts, color.gamma_multiply(0.25), Stroke::new(1.2, color)));
-}
-
-fn draw_files_icon(p: &Painter, c: egui::Pos2, color: Color32) {
-    let st = Stroke::new(1.5, color);
-    let back = Rect::from_min_size(pos2(c.x - 5.0, c.y - 11.0), vec2(13.0, 17.0));
-    let front = Rect::from_min_size(pos2(c.x - 9.0, c.y - 6.0), vec2(13.0, 17.0));
-    p.line_segment([back.left_top(), back.right_top()], st);
-    p.line_segment([back.right_top(), back.right_bottom()], st);
-    p.line_segment([back.left_top(), pos2(back.left(), front.top())], st);
-    p.line_segment([back.right_bottom(), pos2(front.right(), back.bottom())], st);
-    p.rect_filled(front, 0.0, theme::p().activity_bg);
-    p.rect_stroke(front, 1.0, st, egui::StrokeKind::Middle);
-}
-
-fn draw_trash_icon(p: &Painter, c: egui::Pos2, color: Color32) {
-    let st = Stroke::new(1.2, color);
-    p.line_segment([pos2(c.x - 6.0, c.y - 4.0), pos2(c.x + 6.0, c.y - 4.0)], st);
-    p.line_segment([pos2(c.x - 2.0, c.y - 6.0), pos2(c.x + 2.0, c.y - 6.0)], st);
-    let body = vec![pos2(c.x - 4.5, c.y - 4.0), pos2(c.x - 3.5, c.y + 6.0), pos2(c.x + 3.5, c.y + 6.0), pos2(c.x + 4.5, c.y - 4.0)];
-    p.add(Shape::line(body, st));
-}
-
-fn draw_gear_icon(p: &Painter, c: egui::Pos2, color: Color32) {
-    let st = Stroke::new(1.6, color);
-    p.circle_stroke(c, 3.5, st);
-    p.circle_stroke(c, 8.0, st);
-    for i in 0..8 {
-        let a = i as f32 * std::f32::consts::TAU / 8.0;
-        let dir = vec2(a.cos(), a.sin());
-        p.line_segment([c + dir * 8.0, c + dir * 11.0], Stroke::new(3.0, color));
-    }
-}
-
-/// An activity-bar button: a rounded hover background, and a pill-shaped
-/// accent marker on the left when active.
-fn activity_item(
-    ui: &Ui,
-    r: Rect,
-    id: &str,
-    active: bool,
-    p: &theme::Palette,
-    draw: fn(&Painter, egui::Pos2, Color32),
-) -> egui::Response {
-    let resp = ui.interact(r, ui.scope_id().with(id), Sense::click());
-    let painter = ui.painter();
-    if resp.hovered() {
-        painter.rect_filled(r.shrink2(vec2(6.0, 4.0)), CornerRadius::same(8), p.list_hover);
-    }
-    if active {
-        let marker = Rect::from_center_size(pos2(r.left() + 1.5, r.center().y), vec2(3.0, 22.0));
-        painter.rect_filled(marker, CornerRadius::same(2), p.accent);
-    }
-    let color = if active || resp.hovered() { p.activity_fg } else { p.icon_inactive };
-    draw(painter, r.center(), color);
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-/// A folder, open or closed, in a warm folder color.
-fn draw_folder_icon(p: &Painter, c: egui::Pos2, open: bool) {
-    let color = Color32::from_rgb(0xdc, 0xb6, 0x7a);
-    let (w, h) = (14.0, 10.5);
-    let body = Rect::from_center_size(c + vec2(0.0, 0.5), vec2(w, h));
-    // The tab on top.
-    let tab = Rect::from_min_size(body.min - vec2(0.0, 2.0), vec2(6.0, 3.0));
-    p.rect_filled(tab, CornerRadius { nw: 2, ne: 2, sw: 0, se: 0 }, color);
-    if open {
-        p.rect_filled(body, CornerRadius::same(2), color.gamma_multiply(0.55));
-        let lid = vec![
-            pos2(body.left() + 2.5, body.top() + 3.0),
-            pos2(body.right() + 1.0, body.top() + 3.0),
-            pos2(body.right() - 1.5, body.bottom()),
-            pos2(body.left(), body.bottom()),
-        ];
-        p.add(Shape::convex_polygon(lid, color, Stroke::NONE));
-    } else {
-        p.rect_filled(body, CornerRadius::same(2), color);
-    }
-}
-
-/// A circular arrow: an open ring with an arrowhead at its upper-right end.
-fn draw_refresh_icon(p: &Painter, c: egui::Pos2, color: Color32) {
-    let r = 5.5;
-    // From just right of the top, counterclockwise most of the way round.
-    let (start, sweep) = (-1.15_f32, -4.9_f32);
-    let points: Vec<egui::Pos2> = (0..=24)
-        .map(|i| {
-            let a = start + sweep * i as f32 / 24.0;
-            pos2(c.x + r * a.cos(), c.y + r * a.sin())
-        })
-        .collect();
-    p.add(Shape::line(points, Stroke::new(1.3, color)));
-    // The head points along the ring at the start, clockwise.
-    let tip = pos2(c.x + r * start.cos(), c.y + r * start.sin());
-    let along = vec2(-start.sin(), start.cos());
-    let out = vec2(start.cos(), start.sin());
-    let head = tip + along * 1.5;
-    p.add(Shape::convex_polygon(
-        vec![head, head - along * 4.0 + out * 2.6, head - along * 4.0 - out * 2.6],
-        color,
-        Stroke::NONE,
-    ));
-}
-
-/// Two stacked squares, the front one with a minus: collapse all.
-fn draw_collapse_icon(p: &Painter, c: egui::Pos2, color: Color32) {
-    let st = Stroke::new(1.1, color);
-    // On the pixel grid, so the thin lines stay crisp.
-    let front = Rect::from_min_size(pos2((c.x - 6.0).round() + 0.5, (c.y - 3.0).round() + 0.5), vec2(9.0, 9.0));
-    p.rect_stroke(front, CornerRadius::same(2), st, egui::StrokeKind::Middle);
-    // The square behind shows as an L above and to the right.
-    let back = vec![
-        pos2(front.left() + 3.0, front.top() - 3.0),
-        pos2(front.right() + 3.0, front.top() - 3.0),
-        pos2(front.right() + 3.0, front.bottom() - 3.0),
-    ];
-    p.add(Shape::line(back, st));
-    p.line_segment([pos2(front.left() + 2.5, front.center().y), pos2(front.right() - 2.5, front.center().y)], st);
-}
-
-fn draw_split_icon(p: &Painter, c: egui::Pos2, color: Color32) {
-    let r = Rect::from_center_size(c, vec2(14.0, 12.0));
-    p.rect_stroke(r, 1.5, Stroke::new(1.2, color), egui::StrokeKind::Inside);
-    p.line_segment([pos2(c.x, r.top()), pos2(c.x, r.bottom())], Stroke::new(1.2, color));
-}
-
-/// A page with a narrow strip on its right: the minimap.
-fn draw_minimap_icon(p: &Painter, c: egui::Pos2, color: Color32) {
-    let r = Rect::from_center_size(c, vec2(14.0, 12.0));
-    p.rect_stroke(r, 1.5, Stroke::new(1.2, color), egui::StrokeKind::Inside);
-    for (i, w) in [6.0, 4.0, 5.0].iter().enumerate() {
-        let y = r.top() + 3.5 + i as f32 * 2.5;
-        p.line_segment([pos2(r.left() + 2.5, y), pos2(r.left() + 2.5 + w, y)], Stroke::new(1.0, color));
-    }
-    p.line_segment([pos2(r.right() - 4.0, r.top()), pos2(r.right() - 4.0, r.bottom())], Stroke::new(1.0, color));
-}
-
-fn draw_search_icon(p: &Painter, c: egui::Pos2, color: Color32) {
-    let st = Stroke::new(1.6, color);
-    p.circle_stroke(pos2(c.x + 2.0, c.y - 2.0), 7.0, st);
-    p.line_segment([pos2(c.x - 3.0, c.y + 3.0), pos2(c.x - 9.0, c.y + 9.0)], Stroke::new(2.2, color));
 }
 
 fn draw_welcome(p: &Painter, rect: Rect, logo: &egui::TextureHandle, keys: &Keybindings) {
