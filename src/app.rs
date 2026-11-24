@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use eframe::egui::{
     self, pos2, vec2, Align2, Color32, CornerRadius, FontId, Frame, Galley, Key as EKey, Margin, Modifiers,
-    Painter, Rect, Sense, Shape, Stroke, Ui,
+    Painter, Rect, Sense, Stroke, Ui,
 };
 
 use crate::buffer::{self, tab_size, Buffer, Pos};
@@ -13,8 +13,13 @@ use crate::commands::{self, Command, Keybindings};
 use crate::diagnostics::{Checker, Grammar, Severity};
 use crate::lsp;
 use crate::explorer::{self, Explorer};
+use crate::git::{self, Git, Repo};
+use crate::icons::*;
 use crate::keymap::{self, MapMode, Mapping, Origin};
 use crate::keys_panel::KeysPanel;
+use crate::palette::{self as cmd_palette, Palette};
+use crate::search::SearchView;
+use crate::session;
 use crate::settings::{self, Settings};
 use crate::settings_page::SettingsPage;
 use crate::syntax;
@@ -26,7 +31,20 @@ use crate::vim::{Action, Key, Mode, Vim};
 
 const UI_SIZE: f32 = 13.0;
 const TAB_GAP: f32 = 3.0;
+const TITLE_BAR_H: f32 = 34.0;
 const TAB_RADIUS: u8 = 7;
+
+#[derive(Clone, Copy, PartialEq)]
+enum PanelTab {
+    Problems,
+    Terminal,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum SidebarView {
+    Explorer,
+    Search,
+}
 
 struct QuickOpen {
     query: String,
@@ -41,11 +59,18 @@ pub struct VexApp {
     vim: Vim,
     explorer: Explorer,
     show_sidebar: bool,
+    sidebar_view: SidebarView,
+    search: SearchView,
     settings: Settings,
     ctx: egui::Context,
     quick_open: Option<QuickOpen>,
+    palette: Option<Palette>,
+    /// Palette entries run lately, newest first.
+    palette_recent: Vec<String>,
     drag_anchor: Option<Pos>,
     follow_cursor: bool,
+    /// Center the cursor line on the next frame (after jumping to it).
+    center_cursor: bool,
     title: String,
     allow_close: bool,
     snapshot: Option<crate::snapshot::Snapshot>,
@@ -56,7 +81,9 @@ pub struct VexApp {
     /// Text events to drop: their key was already used by position (see `vim_key_positions`).
     skip_text: usize,
     terminal: Option<Terminal>,
+    /// The bottom panel (Problems and Terminal tabs) is open.
     show_terminal: bool,
+    panel_tab: PanelTab,
     terminal_focused: bool,
     /// Wheel movement not yet turned into whole scrollback lines.
     terminal_scroll: f32,
@@ -65,6 +92,13 @@ pub struct VexApp {
     checker: Checker,
     /// Language servers, for type checking.
     lsp: lsp::Manager,
+    git: Git,
+    /// Status of the project's git repository, once known (None: not a repo).
+    repo: Option<Repo>,
+    /// When git status was last asked for.
+    git_checked_at: f64,
+    /// Whether the window had focus last frame (coming back refreshes git).
+    window_focused: bool,
     /// What each language server is busy with, like "Indexing 40%".
     lsp_progress: std::collections::BTreeMap<String, String>,
     /// The language-server settings the servers were started with.
@@ -72,6 +106,8 @@ pub struct VexApp {
     keys: Keybindings,
     keys_panel: Option<KeysPanel>,
     settings_page: Option<SettingsPage>,
+    /// Vex draws the title bar (decided at startup, see main.rs).
+    custom_title_bar: bool,
     /// Settings changed in the page and not yet written to disk, and when.
     settings_dirty_at: Option<f64>,
 }
@@ -88,11 +124,19 @@ impl VexApp {
             vim: Vim::default(),
             explorer: Explorer::new(root),
             show_sidebar: true,
+            sidebar_view: SidebarView::Explorer,
+            search: {
+                let ctx = cc.egui_ctx.clone();
+                SearchView::new(move || ctx.request_repaint())
+            },
             settings: Settings::default(),
             ctx: cc.egui_ctx.clone(),
             quick_open: None,
+            palette: None,
+            palette_recent: Vec::new(),
             drag_anchor: None,
             follow_cursor: true,
+            center_cursor: false,
             title: String::new(),
             allow_close: false,
             snapshot: crate::snapshot::Snapshot::from_env(),
@@ -101,6 +145,7 @@ impl VexApp {
             skip_text: 0,
             terminal: None,
             show_terminal: false,
+            panel_tab: PanelTab::Terminal,
             terminal_focused: false,
             terminal_scroll: 0.0,
             logo,
@@ -112,18 +157,38 @@ impl VexApp {
                 let ctx = cc.egui_ctx.clone();
                 lsp::Manager::new(move || ctx.request_repaint())
             },
+            git: {
+                let ctx = cc.egui_ctx.clone();
+                Git::new(move || ctx.request_repaint())
+            },
+            repo: None,
+            git_checked_at: f64::NEG_INFINITY,
+            window_focused: true,
             lsp_progress: Default::default(),
             applied_lsp: None,
             keys: Keybindings::default(),
             keys_panel: None,
             settings_page: None,
+            custom_title_bar: false,
             settings_dirty_at: None,
         };
         app.reload_settings(&cc.egui_ctx);
+        app.custom_title_bar = app.settings.custom_title_bar;
         app.load_keybindings();
         app.load_init_script();
         if let Some(f) = file {
             app.open(&f);
+        } else if app.settings.restore_session {
+            if let Some(s) = session::load(&app.explorer.root) {
+                app.ws.restore(&s);
+                for g in &app.ws.groups {
+                    for t in &g.tabs {
+                        if let Some(p) = &app.ws.buffers[t.buf].path {
+                            app.explorer.reveal(p);
+                        }
+                    }
+                }
+            }
         }
         app
     }
@@ -376,7 +441,18 @@ impl VexApp {
                 self.vim.mode = Mode::Command;
                 self.vim.cmdline.clear();
             }
+            Command::CommandPalette => {
+                self.quick_open = None;
+                self.palette = match self.palette {
+                    Some(_) => None,
+                    None => {
+                        self.terminal_focused = false;
+                        Some(Palette::new(self.palette_entries(), self.palette_recent.clone()))
+                    }
+                };
+            }
             Command::QuickOpen => {
+                self.palette = None;
                 self.quick_open = match self.quick_open {
                     Some(_) => None,
                     None => Some(QuickOpen {
@@ -387,7 +463,9 @@ impl VexApp {
                 };
             }
             Command::ToggleSidebar => self.show_sidebar = !self.show_sidebar,
+            Command::FindInFiles => self.show_search(),
             Command::ToggleTerminal => self.toggle_terminal(),
+            Command::ShowProblems => self.toggle_problems(),
             Command::ToggleWrap => {
                 self.settings.word_wrap = !self.settings.word_wrap;
                 self.follow_cursor = true;
@@ -410,6 +488,96 @@ impl VexApp {
             }
         }
         ctx.request_repaint();
+    }
+
+    /// Whether Go to File or the command palette is up (they take the keys).
+    fn overlay_open(&self) -> bool {
+        self.quick_open.is_some() || self.palette.is_some()
+    }
+
+    fn palette_entries(&self) -> Vec<cmd_palette::Entry> {
+        use cmd_palette::{Entry, Item};
+        let mut out: Vec<Entry> = commands::COMMANDS
+            .iter()
+            .filter(|i| !matches!(i.command, Command::CommandPalette))
+            .map(|i| {
+                let label = self.keys.label(i.command);
+                Entry { title: i.title.to_string(), detail: if label == "—" { String::new() } else { label }, item: Item::Command(i.command) }
+            })
+            .collect();
+        let extra: [(&str, Item); 13] = [
+            ("Color Theme", Item::ThemePicker),
+            ("Open Settings File (settings.toml)", Item::OpenSettingsFile),
+            ("Open Startup Script (init.vex)", Item::OpenInitScript),
+            ("Save All Files", Item::Ex("wa")),
+            ("Close Editor", Item::Ex("q")),
+            ("Close Other Panes", Item::Ex("only")),
+            ("Reveal Active File in Explorer", Item::RevealInExplorer),
+            ("Toggle Line Numbers", Item::Ex("set number!")),
+            ("Toggle Relative Line Numbers", Item::Ex("set relativenumber!")),
+            ("Toggle Indent Guides", Item::Ex("set indentguides!")),
+            ("Toggle Breadcrumbs", Item::Ex("set breadcrumbs!")),
+            ("Toggle Current Line Highlight", Item::Ex("set cursorline!")),
+            ("Clear Search Highlight", Item::Ex("noh")),
+        ];
+        out.extend(extra.into_iter().map(|(t, item)| Entry { title: t.to_string(), detail: String::new(), item }));
+        out
+    }
+
+    fn palette_overlay(&mut self, ctx: &egui::Context) {
+        use cmd_palette::Item;
+        let Some(palette) = &mut self.palette else { return };
+        let out = palette.show(ctx);
+        if palette.theme_before.is_none() {
+            self.palette_recent = palette.recent().to_vec();
+        }
+        if let Some(name) = out.preview_theme {
+            self.settings.theme = name;
+            self.apply_settings(ctx);
+        }
+        if out.close {
+            self.palette = None;
+        }
+        match out.run {
+            Some(Item::Command(c)) => self.run_command(ctx, c),
+            Some(Item::Ex(line)) => {
+                self.run_ex(ctx, line);
+                // Toggles from the palette last, like changes in the Settings page.
+                if line.starts_with("set ") {
+                    self.settings_dirty_at = Some(ctx.input(|i| i.time));
+                }
+            }
+            Some(Item::ThemePicker) => self.palette = Some(Palette::themes(&self.settings.theme)),
+            Some(Item::Theme(name)) => {
+                self.settings.theme = name;
+                self.apply_settings(ctx);
+                self.settings_dirty_at = Some(ctx.input(|i| i.time));
+            }
+            Some(Item::OpenSettingsFile) => self.open_settings(),
+            Some(Item::OpenInitScript) => self.open_init_script(),
+            Some(Item::RevealInExplorer) => {
+                if let Some(path) = self.ws.current_buf().and_then(|b| b.path.clone()) {
+                    self.explorer.reveal(&path);
+                    self.show_sidebar = true;
+                    self.sidebar_view = SidebarView::Explorer;
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Run a `:` command line as if it were typed.
+    fn run_ex(&mut self, ctx: &egui::Context, line: &str) {
+        let buf = match self.ws.current() {
+            Some(b) => &mut self.ws.buffers[b],
+            None => &mut self.scratch,
+        };
+        match self.vim.execute(buf, line) {
+            Ok(Some(action)) => self.handle_action(ctx, action),
+            Ok(None) => {}
+            Err(e) => self.error(e),
+        }
+        self.follow_cursor = true;
     }
 
     fn info(&mut self, msg: impl Into<String>) {
@@ -514,6 +682,7 @@ impl VexApp {
                 self.info(msg);
                 self.lsp.did_save(id);
                 self.explorer.refresh();
+                self.git_checked_at = f64::NEG_INFINITY; // the file's status may have changed
                 if is_settings && self.reload_settings(&self.ctx.clone()) {
                     self.info("Settings applied");
                 }
@@ -680,6 +849,59 @@ impl VexApp {
 
     /// Collect finished syntax checks and language-server results, and send
     /// changed files to both once typing pauses.
+    /// Keep git status and the gutter's changed lines up to date.
+    fn update_git(&mut self, ctx: &egui::Context) {
+        const STATUS_EVERY: f64 = 4.0;
+        let (now, focused) = ctx.input(|i| (i.time, i.focused));
+        // Coming back to the window: maybe something was committed meanwhile.
+        if focused && !self.window_focused {
+            self.git_checked_at = f64::NEG_INFINITY;
+        }
+        self.window_focused = focused;
+        if now - self.git_checked_at >= STATUS_EVERY {
+            self.git_checked_at = now;
+            self.git.refresh_status(&self.explorer.root);
+        }
+        for done in self.git.results().collect::<Vec<_>>() {
+            match done {
+                git::Done::Status(repo) => {
+                    let new_head = repo.as_ref().map(|r| &r.head) != self.repo.as_ref().map(|r| &r.head);
+                    if new_head {
+                        for buf in &mut self.ws.buffers {
+                            buf.git_version = None; // diff again against the new HEAD
+                        }
+                    }
+                    if repo.is_none() {
+                        for buf in &mut self.ws.buffers {
+                            buf.git_changes.clear();
+                        }
+                    }
+                    self.repo = repo;
+                }
+                git::Done::Diff { id, version, changes } => {
+                    if let Some(buf) = self.ws.buffers.iter_mut().find(|b| b.id == id && b.version == version) {
+                        buf.git_changes = changes;
+                    }
+                }
+            }
+        }
+        if self.repo.is_none() {
+            return;
+        }
+        let paused = now - self.last_input >= 0.15;
+        for buf in &mut self.ws.buffers {
+            // Files outside the repository come back with no changes (and are
+            // only asked about once).
+            let Some(path) = &buf.path else { continue };
+            if buf.git_version == Some(buf.version) || (buf.git_version.is_some() && !paused) {
+                continue;
+            }
+            buf.git_version = Some(buf.version);
+            let lines = buf.lines.iter().map(|l| l.iter().collect()).collect();
+            self.git.diff(buf.id, buf.version, path, lines);
+        }
+    }
+
     fn update_diagnostics(&mut self, ctx: &egui::Context) {
         const PAUSE: f64 = 0.15;
         let idle = ctx.input(|i| i.time) - self.last_input;
@@ -832,12 +1054,23 @@ impl VexApp {
 
     /// Keys go to the terminal when its panel is open and focused.
     fn terminal_has_keys(&self) -> bool {
-        self.show_terminal && self.terminal_focused && self.terminal.is_some() && self.quick_open.is_none()
+        self.show_terminal && self.panel_tab == PanelTab::Terminal && self.terminal_focused && self.terminal.is_some() && !self.overlay_open()
+    }
+
+    fn toggle_problems(&mut self) {
+        if self.show_terminal && self.panel_tab == PanelTab::Problems {
+            self.show_terminal = false;
+        } else {
+            self.show_terminal = true;
+            self.panel_tab = PanelTab::Problems;
+        }
+        self.terminal_focused = false;
     }
 
     fn toggle_terminal(&mut self) {
-        if !self.show_terminal {
+        if !self.show_terminal || self.panel_tab != PanelTab::Terminal {
             self.show_terminal = true;
+            self.panel_tab = PanelTab::Terminal;
             self.terminal_focused = true;
         } else if self.terminal_focused {
             self.show_terminal = false;
@@ -881,13 +1114,25 @@ impl VexApp {
                 self.terminal_input(ctx, ev);
                 continue;
             }
+            // Typing in the Search box: only app shortcuts, and Esc to go back.
+            if self.search.has_focus {
+                if let egui::Event::Key { key, pressed: true, modifiers, .. } = ev {
+                    if key == EKey::Escape {
+                        self.search.has_focus = false;
+                        ctx.memory_mut(|m| m.stop_text_input());
+                    } else if let Some(c) = self.keys.lookup(key, modifiers) {
+                        self.run_command(ctx, c);
+                    }
+                }
+                continue;
+            }
             match ev {
                 egui::Event::Key { key, physical_key, pressed: true, modifiers, .. } => {
                     if let Some(c) = self.keys.lookup(key, modifiers) {
                         self.run_command(ctx, c);
                         continue;
                     }
-                    if self.quick_open.is_some() {
+                    if self.overlay_open() {
                         continue;
                     }
                     // With key positions on, vim commands follow where a key sits on a
@@ -937,7 +1182,7 @@ impl VexApp {
                         self.feed(ctx, k);
                     }
                 }
-                egui::Event::Text(t) if self.quick_open.is_none() => {
+                egui::Event::Text(t) if !self.overlay_open() => {
                     if self.skip_text > 0 {
                         self.skip_text -= 1;
                         continue;
@@ -947,11 +1192,11 @@ impl VexApp {
                     }
                 }
                 // Ctrl+C: copy the selection in visual mode, otherwise act like Esc (as in vim).
-                egui::Event::Copy if self.quick_open.is_none() => {
+                egui::Event::Copy if !self.overlay_open() => {
                     let key = if matches!(self.vim.mode, Mode::Visual | Mode::VisualLine) { Key::Char('y') } else { Key::Esc };
                     self.feed(ctx, key);
                 }
-                egui::Event::Paste(t) if self.quick_open.is_none() => {
+                egui::Event::Paste(t) if !self.overlay_open() => {
                     let buf = match self.ws.current() {
                         Some(b) => &mut self.ws.buffers[b],
                         None => &mut self.scratch,
@@ -991,29 +1236,177 @@ impl VexApp {
 
     // ---- chrome --------------------------------------------------------
 
+    /// Vex's own title bar: the logo, a search box in the middle that opens Go
+    /// to File, layout toggles, and the window buttons. Dragging it moves the
+    /// window; double-clicking maximizes.
+    fn title_bar(&mut self, ui: &mut Ui) {
+        let rect = ui.max_rect();
+        let p = theme::p();
+        let ctx = ui.ctx().clone();
+        let painter = ui.painter().clone();
+        painter.line_segment([rect.left_bottom() - vec2(0.0, 0.5), rect.right_bottom() - vec2(0.0, 0.5)], Stroke::new(1.0, p.separator));
+        let mac = cfg!(target_os = "macos");
+        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+
+        // The empty parts of the bar move the window. Added first, so the
+        // buttons on top of it get their clicks.
+        let drag = ui.interact(rect, ui.scope_id().with("title-drag"), Sense::click_and_drag());
+        if drag.drag_started_by(egui::PointerButton::Primary) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+        if drag.double_clicked() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+        }
+
+        // The logo, lined up with the activity bar's icons (after macOS's own buttons).
+        let logo_x = if mac { rect.left() + 86.0 } else { rect.left() + 24.0 };
+        let logo = Rect::from_center_size(pos2(logo_x, rect.center().y), vec2(20.0, 20.0));
+        painter.image(self.logo.id(), logo, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        ui.interact(logo.expand(4.0), ui.scope_id().with("title-logo"), Sense::hover())
+            .on_hover_text(format!("Vex {}", env!("CARGO_PKG_VERSION")));
+
+        // Window buttons on the right (macOS has its own on the left).
+        let mut right = rect.right();
+        if !mac {
+            let buttons: [(&str, &str); 3] = [("close", "Close"), ("max", if maximized { "Restore" } else { "Maximize" }), ("min", "Minimize")];
+            for (kind, tip) in buttons {
+                let r = Rect::from_min_max(pos2(right - 46.0, rect.top()), pos2(right, rect.bottom()));
+                right = r.left();
+                let resp = ui.interact(r, ui.scope_id().with(("win", kind)), Sense::click());
+                let close_hot = kind == "close" && resp.hovered();
+                if close_hot {
+                    painter.rect_filled(r, 0.0, Color32::from_rgb(0xc4, 0x2b, 0x1c));
+                } else if resp.hovered() {
+                    painter.rect_filled(r, 0.0, p.list_hover);
+                }
+                let color = if close_hot { Color32::WHITE } else { p.text_ui };
+                match kind {
+                    "close" => draw_x(&painter, r.center(), 5.0, color),
+                    "max" => draw_maximize_icon(&painter, r.center(), color, maximized),
+                    _ => draw_minimize_icon(&painter, r.center(), color),
+                }
+                if resp.on_hover_text(tip).clicked() {
+                    match kind {
+                        "close" => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                        "max" => ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized)),
+                        _ => ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true)),
+                    }
+                }
+            }
+            right -= 8.0;
+        }
+
+        // Layout toggles: sidebar and bottom panel.
+        let toggles: [(&str, bool, String); 2] = [
+            ("sidebar", self.show_sidebar, format!("Toggle Sidebar ({})", self.keys.label(Command::ToggleSidebar))),
+            ("panel", self.show_terminal, format!("Toggle Panel ({})", self.keys.label(Command::ToggleTerminal))),
+        ];
+        for (kind, on, tip) in toggles.into_iter().rev() {
+            let r = Rect::from_center_size(pos2(right - 16.0, rect.center().y), vec2(26.0, 24.0));
+            right = r.left() - 2.0;
+            let resp = ui.interact(r, ui.scope_id().with(("layout", kind)), Sense::click());
+            if resp.hovered() {
+                painter.rect_filled(r, CornerRadius::same(5), p.list_hover);
+            }
+            let color = if resp.hovered() { p.text_bright } else { p.text_muted };
+            if kind == "sidebar" {
+                draw_sidebar_toggle_icon(&painter, r.center(), color, on);
+            } else {
+                draw_panel_toggle_icon(&painter, r.center(), color, on);
+            }
+            if resp.on_hover_text(tip).clicked() {
+                match kind {
+                    "sidebar" => self.show_sidebar = !self.show_sidebar,
+                    _ if self.show_terminal => {
+                        self.show_terminal = false;
+                        self.terminal_focused = false;
+                    }
+                    _ => self.show_terminal = true,
+                }
+            }
+        }
+
+        // The search box in the middle, like VS Code's command center.
+        let w = (rect.width() * 0.38).clamp(200.0, 520.0);
+        let center = Rect::from_center_size(rect.center(), vec2(w, 24.0));
+        let center = center.translate(vec2((logo.right() + 16.0 - center.left()).max(0.0), 0.0));
+        if center.right() < right - 8.0 {
+            let resp = ui.interact(center, ui.scope_id().with("command-center"), Sense::click());
+            let fill = if resp.hovered() { p.list_hover } else { p.input_bg };
+            painter.rect(center, CornerRadius::same(6), fill, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+            let label = galley(&ctx, self.explorer.root_name(), 12.5, p.text_ui);
+            let total = 14.0 + 6.0 + label.size().x;
+            let x0 = center.center().x - total / 2.0;
+            draw_search_icon_small(&painter, pos2(x0 + 6.0, center.center().y), p.text_muted);
+            painter.galley(pos2(x0 + 20.0, center.center().y - label.size().y / 2.0), label, p.text_ui);
+            let tip = format!(
+                "Go to File ({})  ·  Commands ({})",
+                self.keys.label(Command::QuickOpen),
+                self.keys.label(Command::CommandPalette)
+            );
+            if resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                self.run_command(&ctx, Command::QuickOpen);
+            }
+        }
+    }
+
+    /// Without the system's title bar there is no system border to resize by,
+    /// so the window's edges do it.
+    fn resize_edges(&mut self, ctx: &egui::Context) {
+        use egui::{CursorIcon, ResizeDirection as Dir};
+        const EDGE: f32 = 5.0;
+        if !self.custom_title_bar || cfg!(target_os = "macos") || ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
+            return;
+        }
+        let screen = ctx.content_rect();
+        let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else { return };
+        let (l, r) = (pos.x - screen.left() < EDGE, screen.right() - pos.x < EDGE);
+        let (t, b) = (pos.y - screen.top() < EDGE, screen.bottom() - pos.y < EDGE);
+        let dir = match (l, r, t, b) {
+            (true, _, true, _) => Dir::NorthWest,
+            (_, true, true, _) => Dir::NorthEast,
+            (true, _, _, true) => Dir::SouthWest,
+            (_, true, _, true) => Dir::SouthEast,
+            (true, ..) => Dir::West,
+            (_, true, ..) => Dir::East,
+            (_, _, true, _) => Dir::North,
+            (.., true) => Dir::South,
+            _ => return,
+        };
+        let cursor = match dir {
+            Dir::North | Dir::South => CursorIcon::ResizeVertical,
+            Dir::East | Dir::West => CursorIcon::ResizeHorizontal,
+            Dir::NorthWest | Dir::SouthEast => CursorIcon::ResizeNwSe,
+            Dir::NorthEast | Dir::SouthWest => CursorIcon::ResizeNeSw,
+        };
+        ctx.set_cursor_icon(cursor);
+        if ctx.input(|i| i.pointer.primary_pressed()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
+        }
+    }
+
     fn activity_bar(&mut self, ui: &mut Ui) {
         let rect = ui.max_rect();
         let p = theme::p();
 
-        // The Vex logo in the top-left corner.
-        let logo_cell = Rect::from_min_size(rect.min, vec2(48.0, 50.0));
-        let logo = Rect::from_center_size(logo_cell.center(), vec2(26.0, 26.0));
-        ui.painter().image(self.logo.id(), logo, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-        ui.interact(logo_cell, ui.scope_id().with("act-logo"), Sense::hover())
-            .on_hover_text(format!("Vex {}", env!("CARGO_PKG_VERSION")));
-
-        let item = |i: usize| Rect::from_min_size(pos2(rect.left(), logo_cell.bottom() + i as f32 * 46.0), vec2(48.0, 46.0));
-        let explorer = activity_item(ui, item(0), "act-explorer", self.show_sidebar, &p, draw_files_icon);
+        let item = |i: usize| Rect::from_min_size(pos2(rect.left(), rect.top() + 4.0 + i as f32 * 46.0), vec2(48.0, 46.0));
+        let explorer_on = self.show_sidebar && self.sidebar_view == SidebarView::Explorer;
+        let search_on = self.show_sidebar && self.sidebar_view == SidebarView::Search;
+        let explorer = activity_item(ui, item(0), "act-explorer", explorer_on, &p, draw_files_icon);
+        let search = activity_item(ui, item(1), "act-search", search_on, &p, draw_search_icon);
         if explorer.clicked() {
-            self.show_sidebar = !self.show_sidebar;
+            self.show_sidebar = !explorer_on;
+            self.sidebar_view = SidebarView::Explorer;
+        }
+        if search.clicked() {
+            if search_on {
+                self.show_sidebar = false;
+            } else {
+                self.show_search();
+            }
         }
         explorer.on_hover_text(format!("Explorer ({})", self.keys.label(Command::ToggleSidebar)));
-
-        let search = activity_item(ui, item(1), "act-search", self.quick_open.is_some(), &p, draw_search_icon);
-        if search.clicked() {
-            self.run_command(&ui.ctx().clone(), Command::QuickOpen);
-        }
-        search.on_hover_text(format!("Go to File ({})", self.keys.label(Command::QuickOpen)));
+        search.on_hover_text(format!("Search ({})", self.keys.label(Command::FindInFiles)));
 
         // Bottom: the gear, like VS Code's Manage button.
         let r = Rect::from_min_size(pos2(rect.left(), rect.bottom() - 50.0), vec2(48.0, 46.0));
@@ -1029,29 +1422,74 @@ impl VexApp {
     }
 
     fn sidebar(&mut self, ui: &mut Ui) {
-        let p = theme::p();
-        let w = ui.available_width();
-        let (r, _) = ui.allocate_exact_size(vec2(w, 35.0), Sense::hover());
-        ui.painter().text(r.left_center() + vec2(20.0, 0.0), Align2::LEFT_CENTER, "EXPLORER", FontId::proportional(11.0), p.text_ui);
-        // Header actions, right-aligned.
-        let refresh = Rect::from_center_size(pos2(r.right() - 22.0, r.center().y), vec2(22.0, 22.0));
-        let collapse = Rect::from_center_size(pos2(r.right() - 48.0, r.center().y), vec2(22.0, 22.0));
-        for (rect, id, tip, draw) in [
-            (refresh, "explorer-refresh", "Refresh", draw_refresh_icon as fn(&Painter, egui::Pos2, Color32)),
-            (collapse, "explorer-collapse", "Collapse Folders", draw_collapse_icon),
-        ] {
-            let resp = ui.interact(rect, ui.scope_id().with(id), Sense::click());
-            if resp.hovered() {
-                ui.painter().rect_filled(rect, CornerRadius::same(5), p.list_hover);
-            }
-            draw(ui.painter(), rect.center(), if resp.hovered() { p.text_bright } else { p.text_muted });
-            if resp.on_hover_text(tip).clicked() {
-                if id == "explorer-refresh" {
-                    self.explorer.refresh();
-                } else {
-                    self.explorer.collapse_all();
+        match self.sidebar_view {
+            SidebarView::Explorer => self.explorer_view(ui),
+            SidebarView::Search => {
+                if let Some(jump) = self.search.show(ui, &self.explorer.root) {
+                    self.open_at(&self.explorer.root.join(&jump.path), jump.line, jump.col);
+                    // Highlight the matches in the editor too; n and N go through them.
+                    self.vim.search = Some(self.search.query.vim_pattern());
+                    self.vim.highlight_search = true;
+                    self.search.has_focus = false;
+                    ui.ctx().memory_mut(|m| m.stop_text_input());
                 }
             }
+        }
+    }
+
+    /// Open the Search view and put the cursor in its box, starting from the
+    /// selected text if there is some.
+    fn show_search(&mut self) {
+        self.show_sidebar = true;
+        self.sidebar_view = SidebarView::Search;
+        self.search.focus_requested = true;
+        self.terminal_focused = false;
+        if let Some(b) = self.ws.current() {
+            let buf = &self.ws.buffers[b];
+            if let Some((a, e)) = self.vim.selection(buf) {
+                if a.line == e.line && matches!(self.vim.mode, Mode::Visual) {
+                    self.search.query.text = buf.slice(a, e);
+                    self.search.query.text.push(buf.lines[e.line].get(e.col).copied().unwrap_or_default());
+                    self.search.query.text.retain(|c| c != '\0');
+                    self.vim.mode = Mode::Normal;
+                    self.search.start(&self.explorer.root);
+                }
+            }
+        }
+    }
+
+    /// Open `path` with the cursor at `line`, `col`.
+    fn open_at(&mut self, path: &Path, line: usize, col: usize) {
+        let target = self.resolve(path);
+        self.open(&target);
+        let Some(b) = self.ws.current() else { return };
+        let buf = &mut self.ws.buffers[b];
+        if buf.path.as_ref() != Some(&target) {
+            return; // it failed to open
+        }
+        let line = line.min(buf.lines.len().saturating_sub(1));
+        buf.cursor = Pos::new(line, col.min(buf.lines[line].len()));
+        buf.want_col = buf.cursor.col;
+        self.follow_cursor = true;
+        self.center_cursor = true;
+    }
+
+    fn explorer_view(&mut self, ui: &mut Ui) {
+        let p = theme::p();
+        let w = ui.available_width();
+        let r = sidebar_header(ui, "EXPLORER");
+        let refresh = Rect::from_center_size(pos2(r.right() - 22.0, r.center().y), vec2(22.0, 22.0));
+        let collapse = Rect::from_center_size(pos2(r.right() - 48.0, r.center().y), vec2(22.0, 22.0));
+        if header_button(ui, refresh, "explorer-refresh", "Refresh", draw_refresh_icon) {
+            self.explorer.refresh();
+            self.git.forget_head();
+            self.git_checked_at = f64::NEG_INFINITY;
+            for buf in &mut self.ws.buffers {
+                buf.git_version = None;
+            }
+        }
+        if header_button(ui, collapse, "explorer-collapse", "Collapse Folders", draw_collapse_icon) {
+            self.explorer.collapse_all();
         }
 
         let (r, _) = ui.allocate_exact_size(vec2(w, 24.0), Sense::hover());
@@ -1093,8 +1531,29 @@ impl VexApp {
                 } else {
                     draw_file_icon(painter, pos2(x + 23.0, r.center().y), theme::file_color(&row.entry.name));
                 }
-                let color = if is_active { p.text_bright } else { p.text_ui };
-                painter.text(pos2(x + 35.0, r.center().y), Align2::LEFT_CENTER, &row.entry.name, FontId::proportional(UI_SIZE), color);
+                // Git status: the name in the status color, and a letter (or a
+                // dot, for a folder with changes inside) at the right.
+                let status = self.repo.as_ref().and_then(|repo| {
+                    if row.entry.is_dir { repo.folders.get(&row.entry.path) } else { repo.files.get(&row.entry.path) }.copied()
+                });
+                let color = match status {
+                    Some(st) => theme::git_color(&p, st),
+                    None if is_active => p.text_bright,
+                    None => p.text_ui,
+                };
+                let mut name_right = r.right() - 10.0;
+                if let Some(st) = status {
+                    let c = theme::git_color(&p, st);
+                    if row.entry.is_dir {
+                        painter.circle_filled(pos2(r.right() - 18.0, r.center().y), 3.0, c.gamma_multiply(0.8));
+                    } else {
+                        painter.text(pos2(r.right() - 18.0, r.center().y), Align2::CENTER_CENTER, st.letter(), FontId::proportional(12.0), c);
+                    }
+                    name_right = r.right() - 30.0;
+                }
+                let name = painter.layout_no_wrap(row.entry.name.clone(), FontId::proportional(UI_SIZE), color);
+                let clip = Rect::from_min_max(pos2(x + 35.0, r.top()), pos2(name_right, r.bottom()));
+                painter.with_clip_rect(clip).galley(pos2(x + 35.0, r.center().y - name.size().y / 2.0), name, color);
                 if resp.clicked() {
                     clicked = Some((row.entry.path.clone(), row.entry.is_dir));
                 }
@@ -1273,6 +1732,19 @@ impl VexApp {
         painter.rect_filled(badge, CornerRadius::same(4), badge_color);
         painter.galley(badge.center() - label.size() / 2.0, label, white);
         let mut x = badge.right() + 10.0;
+        // The git branch, with commits to push / pull.
+        if let Some(repo) = self.repo.as_ref().filter(|r| !r.branch.is_empty()) {
+            let mut text = repo.branch.clone();
+            if repo.ahead > 0 {
+                text.push_str(&format!(" ↑{}", repo.ahead));
+            }
+            if repo.behind > 0 {
+                text.push_str(&format!(" ↓{}", repo.behind));
+            }
+            draw_branch_icon(painter, pos2(x + 5.0, rect.center().y), fg);
+            let r = painter.text(pos2(x + 14.0, rect.center().y), Align2::LEFT_CENTER, text, font.clone(), fg);
+            x = r.right() + 14.0;
+        }
         if let Some(name) = self.ws.current_buf().map(|b| b.name()) {
             let r = painter.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, name, font.clone(), fg);
             x = r.right() + 14.0;
@@ -1302,20 +1774,14 @@ impl VexApp {
                 painter.rect_filled(r, CornerRadius::same(3), p.list_hover);
             }
             // Error count: a circled x. Warning count: a triangle.
-            let c = pos2(x + 6.0, rect.center().y);
-            painter.circle_stroke(c, 5.5, Stroke::new(1.3, p.error));
-            draw_x(painter, c, 2.3, p.error);
+            draw_error_icon(painter, pos2(x + 6.0, rect.center().y), p.error);
             painter.galley(pos2(x + 16.0, rect.center().y - err_count.size().y / 2.0), err_count, fg);
-            let t = pos2(warn_x, rect.center().y);
-            painter.add(Shape::convex_polygon(
-                vec![pos2(t.x, t.y + 5.0), pos2(t.x + 6.0, t.y - 5.5), pos2(t.x + 12.0, t.y + 5.0)],
-                Color32::TRANSPARENT,
-                Stroke::new(1.3, p.warning),
-            ));
+            draw_warning_icon(painter, pos2(warn_x + 6.0, rect.center().y), p.warning);
             painter.galley(pos2(warn_x + 16.0, rect.center().y - warn_count.size().y / 2.0), warn_count, fg);
             x = r.right() + 12.0;
-            if resp.on_hover_text("Errors and warnings: click, or ]d / [d, to go to the next one").clicked() {
-                self.jump_diagnostic(true);
+            let tip = format!("Problems ({}); ]d / [d go to the next / previous one", self.keys.label(Command::ShowProblems));
+            if resp.on_hover_text(tip).clicked() {
+                self.toggle_problems();
             }
         }
         if let (None, Some((msg, severity))) = (&self.vim.message, cursor_problem) {
@@ -1427,12 +1893,13 @@ impl VexApp {
             }
 
             let follow = g == self.ws.focus && std::mem::take(&mut self.follow_cursor);
+            let center = follow && std::mem::take(&mut self.center_cursor);
             let cursor_visible = self.cursor_blink_on(ui.ctx());
-            let editor_focused = !(self.show_terminal && self.terminal_focused);
+            let editor_focused = !(self.show_terminal && self.panel_tab == PanelTab::Terminal && self.terminal_focused);
             let (vim, settings, drag) = (&mut self.vim, &self.settings, &mut self.drag_anchor);
             let resp = self.ws.with_view(g, |buf, focused| {
                 let focused = focused && editor_focused;
-                let view = View { buf, vim, settings, focused, follow_cursor: follow, drag_anchor: drag, cursor_visible };
+                let view = View { buf, vim, settings, focused, follow_cursor: follow, center_cursor: center, drag_anchor: drag, cursor_visible };
                 view.show(ui, body, ui.scope_id().with(("editor", g)))
             });
             match resp {
@@ -1461,7 +1928,95 @@ impl VexApp {
         }
     }
 
-    // ---- terminal panel --------------------------------------------------
+    // ---- bottom panel ----------------------------------------------------
+
+    /// Every problem in the open files, by file; clicking one goes there.
+    fn problems_list(&mut self, ui: &mut Ui, body: Rect) {
+        let p = theme::p();
+        // Rows: a file header, then its problems.
+        let mut files: Vec<usize> = (0..self.ws.buffers.len()).filter(|&b| !self.ws.buffers[b].diagnostics.is_empty()).collect();
+        files.sort_by_key(|&b| self.ws.buffers[b].name());
+        let rows: Vec<(usize, Option<usize>)> = files
+            .iter()
+            .flat_map(|&b| std::iter::once((b, None)).chain((0..self.ws.buffers[b].diagnostics.len()).map(move |d| (b, Some(d)))))
+            .collect();
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body.shrink2(vec2(8.0, 2.0))));
+        if rows.is_empty() {
+            child.add_space(8.0);
+            child.horizontal(|ui| {
+                ui.add_space(12.0);
+                ui.label(egui::RichText::new("No problems have been detected in the open files.").size(12.5).color(p.text_muted));
+            });
+            return;
+        }
+        let mut jump = None;
+        const ROW_H: f32 = 22.0;
+        egui::ScrollArea::vertical().id_salt("problems").auto_shrink(false).show_rows(&mut child, ROW_H, rows.len(), |ui, range| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for &(b, d) in &rows[range] {
+                let buf = &self.ws.buffers[b];
+                let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
+                let painter = ui.painter();
+                if resp.hovered() {
+                    painter.rect_filled(r, CornerRadius::same(5), p.list_hover);
+                }
+                let y = r.center().y;
+                match d {
+                    None => {
+                        let name = buf.name();
+                        draw_chevron(painter, pos2(r.left() + 10.0, y), true, p.text_muted);
+                        draw_file_icon(painter, pos2(r.left() + 26.0, y), theme::file_color(&name));
+                        let nr = painter.text(pos2(r.left() + 38.0, y), Align2::LEFT_CENTER, &name, FontId::proportional(13.0), p.text_bright);
+                        let mut x = nr.right() + 8.0;
+                        if let Some(dir) = buf.path.as_ref().and_then(|p| p.parent()) {
+                            let dir = dir.strip_prefix(&self.explorer.root).unwrap_or(dir);
+                            if !dir.as_os_str().is_empty() {
+                                let dr = painter.text(pos2(x, y), Align2::LEFT_CENTER, dir.display(), FontId::proportional(12.0), p.text_muted);
+                                x = dr.right() + 8.0;
+                            }
+                        }
+                        let g = painter.layout_no_wrap(buf.diagnostics.len().to_string(), FontId::proportional(10.5), p.text_bright);
+                        let pill = Rect::from_min_size(pos2(x, y - 8.0), vec2((g.size().x + 10.0).max(16.0), 16.0));
+                        painter.rect_filled(pill, CornerRadius::same(8), p.input_bg);
+                        painter.galley(pill.center() - g.size() / 2.0, g, p.text_bright);
+                    }
+                    Some(i) => {
+                        let diag = &buf.diagnostics[i];
+                        let c = pos2(r.left() + 40.0, y);
+                        let color = theme::severity_color(&p, diag.severity);
+                        match diag.severity {
+                            Severity::Error => draw_error_icon(painter, c, color),
+                            Severity::Warning => draw_warning_icon(painter, c, color),
+                            Severity::Info => draw_info_icon(painter, c, color),
+                        }
+                        let msg = diag.message.lines().next().unwrap_or("");
+                        let where_ = format!("[Ln {}, Col {}]", diag.start.line + 1, diag.start.col + 1);
+                        let wg = painter.layout_no_wrap(where_, FontId::proportional(12.0), p.text_muted);
+                        let mg = painter.layout_no_wrap(msg.to_string(), FontId::proportional(13.0), p.text_ui);
+                        let x = r.left() + 54.0;
+                        let max_msg = (r.right() - x - wg.size().x - 16.0).max(40.0);
+                        let clip = Rect::from_min_max(pos2(x, r.top()), pos2(x + max_msg, r.bottom()));
+                        let msg_w = mg.size().x.min(max_msg);
+                        let cut_off = mg.size().x > max_msg;
+                        painter.with_clip_rect(clip).galley(pos2(x, y - mg.size().y / 2.0), mg, p.text_ui);
+                        painter.galley(pos2(x + msg_w + 8.0, y - wg.size().y / 2.0), wg, p.text_muted);
+                        let resp = if diag.message.contains('\n') || cut_off {
+                            resp.on_hover_text(diag.message.clone())
+                        } else {
+                            resp
+                        };
+                        if resp.clicked() {
+                            jump = Some((buf.path.clone(), diag.start));
+                        }
+                    }
+                }
+            }
+        });
+        if let Some((Some(path), pos)) = jump {
+            self.open_at(&path, pos.line, pos.col);
+        }
+    }
+
 
     fn terminal_panel(&mut self, ui: &mut Ui) {
         let rect = ui.max_rect();
@@ -1471,40 +2026,78 @@ impl VexApp {
         let painter = ui.painter_at(rect);
         painter.line_segment([rect.left_top(), rect.right_top()], Stroke::new(1.0, p.border));
 
-        // Header: the TERMINAL tab plus kill and close buttons, like VS Code's panel.
+        // Header: the PROBLEMS and TERMINAL tabs, then the panel's buttons.
         let header = Rect::from_min_size(rect.min, vec2(rect.width(), 35.0));
-        let title = painter.text(
-            pos2(header.left() + 20.0, header.center().y),
-            Align2::LEFT_CENTER,
-            "TERMINAL",
-            FontId::proportional(11.0),
-            p.text_bright,
-        );
-        let underline = Rect::from_min_max(pos2(title.left(), title.bottom() + 5.0), pos2(title.right(), title.bottom() + 7.0));
-        painter.rect_filled(underline, CornerRadius::same(1), if self.terminal_focused { p.accent } else { p.text_muted });
-        if let Some(t) = &self.terminal {
-            painter.text(pos2(title.right() + 16.0, header.center().y), Align2::LEFT_CENTER, &t.name, FontId::proportional(12.0), p.text_muted);
+        let (errors, warnings) = self.ws.buffers.iter().flat_map(|b| &b.diagnostics).fold((0, 0), |(e, w), d| {
+            if d.severity == Severity::Error { (e + 1, w) } else { (e, w + 1) }
+        });
+        let mut x = header.left() + 20.0;
+        let mut switch = None;
+        for (tab, label) in [(PanelTab::Problems, "PROBLEMS"), (PanelTab::Terminal, "TERMINAL")] {
+            let active = self.panel_tab == tab;
+            let color = if active { p.text_bright } else { p.text_muted };
+            let title = painter.text(pos2(x, header.center().y), Align2::LEFT_CENTER, label, FontId::proportional(11.0), color);
+            let mut right = title.right();
+            // The problem count, as a small pill.
+            if tab == PanelTab::Problems && errors + warnings > 0 {
+                let g = painter.layout_no_wrap((errors + warnings).to_string(), FontId::proportional(10.5), p.text_bright);
+                let pill = Rect::from_min_size(pos2(right + 6.0, header.center().y - 8.0), vec2((g.size().x + 10.0).max(16.0), 16.0));
+                painter.rect_filled(pill, CornerRadius::same(8), p.input_bg);
+                painter.galley(pill.center() - g.size() / 2.0, g, p.text_bright);
+                right = pill.right();
+            }
+            let hit = Rect::from_min_max(pos2(title.left() - 6.0, header.top() + 4.0), pos2(right + 6.0, header.bottom() - 4.0));
+            let resp = ui.interact(hit, ui.scope_id().with(("panel-tab", label)), Sense::click());
+            if resp.hovered() && !active {
+                painter.text(title.left_center(), Align2::LEFT_CENTER, label, FontId::proportional(11.0), p.text_ui);
+            }
+            if active {
+                let focused = tab == PanelTab::Problems || self.terminal_focused;
+                let underline = Rect::from_min_max(pos2(title.left(), title.bottom() + 5.0), pos2(right, title.bottom() + 7.0));
+                painter.rect_filled(underline, CornerRadius::same(1), if focused { p.accent } else { p.text_muted });
+            }
+            if resp.clicked() {
+                switch = Some(tab);
+            }
+            x = right + 24.0;
         }
+        if let Some(tab) = switch {
+            self.panel_tab = tab;
+            self.terminal_focused = tab == PanelTab::Terminal;
+        }
+        let on_terminal = self.panel_tab == PanelTab::Terminal;
         let close = Rect::from_center_size(pos2(header.right() - 22.0, header.center().y), vec2(22.0, 22.0));
         let kill = Rect::from_center_size(pos2(header.right() - 50.0, header.center().y), vec2(22.0, 22.0));
+        if on_terminal {
+            if let Some(t) = &self.terminal {
+                painter.text(pos2(kill.left() - 10.0, header.center().y), Align2::RIGHT_CENTER, &t.name, FontId::proportional(12.0), p.text_muted);
+            }
+        }
         let close_resp = ui.interact(close, ui.scope_id().with("term-close"), Sense::click());
-        let kill_resp = ui.interact(kill, ui.scope_id().with("term-kill"), Sense::click());
-        for (r, resp) in [(close, &close_resp), (kill, &kill_resp)] {
-            if resp.hovered() {
+        let kill_resp = on_terminal.then(|| ui.interact(kill, ui.scope_id().with("term-kill"), Sense::click()));
+        for (r, resp) in [(close, Some(&close_resp)), (kill, kill_resp.as_ref())] {
+            if resp.is_some_and(|r| r.hovered()) {
                 painter.rect_filled(r, CornerRadius::same(4), p.list_hover);
             }
         }
         draw_x(&painter, close.center(), 4.5, p.text_ui);
-        draw_trash_icon(&painter, kill.center(), p.text_ui);
-        if close_resp.on_hover_text("Hide Panel (Ctrl+`)").clicked() {
+        if on_terminal {
+            draw_trash_icon(&painter, kill.center(), p.text_ui);
+        }
+        if close_resp.on_hover_text(format!("Hide Panel ({})", self.keys.label(Command::ToggleTerminal))).clicked() {
             self.show_terminal = false;
             self.terminal_focused = false;
             return;
         }
-        if kill_resp.on_hover_text("Kill Terminal").clicked() {
+        if kill_resp.is_some_and(|r| r.on_hover_text("Kill Terminal").clicked()) {
             self.terminal = None;
             self.show_terminal = false;
             self.terminal_focused = false;
+            return;
+        }
+        if !on_terminal {
+            let body = Rect::from_min_max(pos2(rect.left(), header.bottom()), rect.max);
+            self.problems_list(ui, body);
             return;
         }
 
@@ -1742,6 +2335,16 @@ impl VexApp {
 }
 
 impl eframe::App for VexApp {
+    fn on_exit(&mut self) {
+        // Remember the open files for next time (not for test snapshots).
+        if self.settings.restore_session && self.snapshot.is_none() {
+            let s = self.ws.session();
+            if let Err(e) = session::save(&self.explorer.root, &s) {
+                eprintln!("vex: could not save the session: {e}");
+            }
+        }
+    }
+
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         if let Some(s) = &mut self.snapshot {
             raw_input.events.extend(s.take_events());
@@ -1757,9 +2360,17 @@ impl eframe::App for VexApp {
         self.check_mapping_timeout(&ctx);
         self.auto_save(&ctx);
         self.update_diagnostics(&ctx);
+        self.update_git(&ctx);
         self.handle_close_request(&ctx);
         self.update_title(&ctx);
 
+        if self.custom_title_bar {
+            egui::Panel::top("titlebar")
+                .exact_size(TITLE_BAR_H)
+                .resizable(false)
+                .frame(Frame::NONE.fill(theme::p().activity_bg))
+                .show(ui, |ui| self.title_bar(ui));
+        }
         egui::Panel::bottom("status")
             .exact_size(22.0)
             .resizable(false)
@@ -1794,8 +2405,10 @@ impl eframe::App for VexApp {
             }
         });
         self.save_settings_if_idle(&ctx);
+        self.resize_edges(&ctx);
 
         self.quick_open_overlay(&ctx);
+        self.palette_overlay(&ctx);
         self.cmdline_overlay(&ctx);
         if let Some(panel) = &mut self.keys_panel {
             let script_maps: Vec<Mapping> =
@@ -1813,7 +2426,8 @@ impl eframe::App for VexApp {
         }
 
         // Keep egui widgets from holding keyboard focus; keys belong to the editor.
-        if self.quick_open.is_none() && self.keys_panel.is_none() && self.settings_page.is_none() {
+        let typing = self.search.has_focus || self.search.focus_requested;
+        if !self.overlay_open() && self.keys_panel.is_none() && self.settings_page.is_none() && !typing {
             if let Some(id) = ctx.memory(|m| m.focused()) {
                 ctx.memory_mut(|m| m.surrender_focus(id));
             }
@@ -1827,200 +2441,10 @@ fn galley(ctx: &egui::Context, text: impl Into<String>, size: f32, color: Color3
     ctx.fonts_mut(|f| f.layout_no_wrap(text.into(), FontId::proportional(size), color))
 }
 
-fn overlay_frame(ctx: &egui::Context, id: &str, add: impl FnOnce(&mut Ui)) {
-    let width = (ctx.content_rect().width() * 0.6).clamp(320.0, 620.0);
-    egui::Area::new(egui::Id::unique(id))
-        .anchor(Align2::CENTER_TOP, vec2(0.0, 8.0))
-        .order(egui::Order::Foreground)
-        .fade_in(false)
-        .show(ctx, |ui| {
-            Frame::NONE
-                .fill(theme::p().widget_bg)
-                .stroke(Stroke::new(1.0, theme::p().border))
-                .corner_radius(8)
-                .inner_margin(6)
-                .shadow(egui::Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(140) })
-                .show(ui, |ui| {
-                    ui.set_width(width);
-                    add(ui);
-                });
-        });
-}
-
-fn draw_chevron(p: &Painter, c: egui::Pos2, down: bool, color: Color32) {
-    let s = 3.5;
-    let pts = if down {
-        vec![pos2(c.x - s, c.y - s / 2.0), pos2(c.x, c.y + s / 2.0), pos2(c.x + s, c.y - s / 2.0)]
-    } else {
-        vec![pos2(c.x - s / 2.0, c.y - s), pos2(c.x + s / 2.0, c.y), pos2(c.x - s / 2.0, c.y + s)]
-    };
-    p.add(Shape::line(pts, Stroke::new(1.3, color)));
-}
-
-fn draw_x(p: &Painter, c: egui::Pos2, s: f32, color: Color32) {
-    let st = Stroke::new(1.2, color);
-    p.line_segment([pos2(c.x - s, c.y - s), pos2(c.x + s, c.y + s)], st);
-    p.line_segment([pos2(c.x + s, c.y - s), pos2(c.x - s, c.y + s)], st);
-}
-
-/// A small page with a folded corner.
-fn draw_file_icon(p: &Painter, c: egui::Pos2, color: Color32) {
-    let (w, h, f) = (9.0, 12.0, 3.0);
-    let (l, t) = (c.x - w / 2.0, c.y - h / 2.0);
-    let pts = vec![
-        pos2(l, t),
-        pos2(l + w - f, t),
-        pos2(l + w, t + f),
-        pos2(l + w, t + h),
-        pos2(l, t + h),
-    ];
-    p.add(Shape::convex_polygon(pts, color.gamma_multiply(0.25), Stroke::new(1.2, color)));
-}
-
-fn draw_files_icon(p: &Painter, c: egui::Pos2, color: Color32) {
-    let st = Stroke::new(1.5, color);
-    let back = Rect::from_min_size(pos2(c.x - 5.0, c.y - 11.0), vec2(13.0, 17.0));
-    let front = Rect::from_min_size(pos2(c.x - 9.0, c.y - 6.0), vec2(13.0, 17.0));
-    p.line_segment([back.left_top(), back.right_top()], st);
-    p.line_segment([back.right_top(), back.right_bottom()], st);
-    p.line_segment([back.left_top(), pos2(back.left(), front.top())], st);
-    p.line_segment([back.right_bottom(), pos2(front.right(), back.bottom())], st);
-    p.rect_filled(front, 0.0, theme::p().activity_bg);
-    p.rect_stroke(front, 1.0, st, egui::StrokeKind::Middle);
-}
-
-fn draw_trash_icon(p: &Painter, c: egui::Pos2, color: Color32) {
-    let st = Stroke::new(1.2, color);
-    p.line_segment([pos2(c.x - 6.0, c.y - 4.0), pos2(c.x + 6.0, c.y - 4.0)], st);
-    p.line_segment([pos2(c.x - 2.0, c.y - 6.0), pos2(c.x + 2.0, c.y - 6.0)], st);
-    let body = vec![pos2(c.x - 4.5, c.y - 4.0), pos2(c.x - 3.5, c.y + 6.0), pos2(c.x + 3.5, c.y + 6.0), pos2(c.x + 4.5, c.y - 4.0)];
-    p.add(Shape::line(body, st));
-}
-
-fn draw_gear_icon(p: &Painter, c: egui::Pos2, color: Color32) {
-    let st = Stroke::new(1.6, color);
-    p.circle_stroke(c, 3.5, st);
-    p.circle_stroke(c, 8.0, st);
-    for i in 0..8 {
-        let a = i as f32 * std::f32::consts::TAU / 8.0;
-        let dir = vec2(a.cos(), a.sin());
-        p.line_segment([c + dir * 8.0, c + dir * 11.0], Stroke::new(3.0, color));
-    }
-}
-
-/// An activity-bar button: a rounded hover background, and a pill-shaped
-/// accent marker on the left when active.
-fn activity_item(
-    ui: &Ui,
-    r: Rect,
-    id: &str,
-    active: bool,
-    p: &theme::Palette,
-    draw: fn(&Painter, egui::Pos2, Color32),
-) -> egui::Response {
-    let resp = ui.interact(r, ui.scope_id().with(id), Sense::click());
-    let painter = ui.painter();
-    if resp.hovered() {
-        painter.rect_filled(r.shrink2(vec2(6.0, 4.0)), CornerRadius::same(8), p.list_hover);
-    }
-    if active {
-        let marker = Rect::from_center_size(pos2(r.left() + 1.5, r.center().y), vec2(3.0, 22.0));
-        painter.rect_filled(marker, CornerRadius::same(2), p.accent);
-    }
-    let color = if active || resp.hovered() { p.activity_fg } else { p.icon_inactive };
-    draw(painter, r.center(), color);
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-/// A folder, open or closed, in a warm folder color.
-fn draw_folder_icon(p: &Painter, c: egui::Pos2, open: bool) {
-    let color = Color32::from_rgb(0xdc, 0xb6, 0x7a);
-    let (w, h) = (14.0, 10.5);
-    let body = Rect::from_center_size(c + vec2(0.0, 0.5), vec2(w, h));
-    // The tab on top.
-    let tab = Rect::from_min_size(body.min - vec2(0.0, 2.0), vec2(6.0, 3.0));
-    p.rect_filled(tab, CornerRadius { nw: 2, ne: 2, sw: 0, se: 0 }, color);
-    if open {
-        p.rect_filled(body, CornerRadius::same(2), color.gamma_multiply(0.55));
-        let lid = vec![
-            pos2(body.left() + 2.5, body.top() + 3.0),
-            pos2(body.right() + 1.0, body.top() + 3.0),
-            pos2(body.right() - 1.5, body.bottom()),
-            pos2(body.left(), body.bottom()),
-        ];
-        p.add(Shape::convex_polygon(lid, color, Stroke::NONE));
-    } else {
-        p.rect_filled(body, CornerRadius::same(2), color);
-    }
-}
-
-/// A circular arrow: an open ring with an arrowhead at its upper-right end.
-fn draw_refresh_icon(p: &Painter, c: egui::Pos2, color: Color32) {
-    let r = 5.5;
-    // From just right of the top, counterclockwise most of the way round.
-    let (start, sweep) = (-1.15_f32, -4.9_f32);
-    let points: Vec<egui::Pos2> = (0..=24)
-        .map(|i| {
-            let a = start + sweep * i as f32 / 24.0;
-            pos2(c.x + r * a.cos(), c.y + r * a.sin())
-        })
-        .collect();
-    p.add(Shape::line(points, Stroke::new(1.3, color)));
-    // The head points along the ring at the start, clockwise.
-    let tip = pos2(c.x + r * start.cos(), c.y + r * start.sin());
-    let along = vec2(-start.sin(), start.cos());
-    let out = vec2(start.cos(), start.sin());
-    let head = tip + along * 1.5;
-    p.add(Shape::convex_polygon(
-        vec![head, head - along * 4.0 + out * 2.6, head - along * 4.0 - out * 2.6],
-        color,
-        Stroke::NONE,
-    ));
-}
-
-/// Two stacked squares, the front one with a minus: collapse all.
-fn draw_collapse_icon(p: &Painter, c: egui::Pos2, color: Color32) {
-    let st = Stroke::new(1.1, color);
-    // On the pixel grid, so the thin lines stay crisp.
-    let front = Rect::from_min_size(pos2((c.x - 6.0).round() + 0.5, (c.y - 3.0).round() + 0.5), vec2(9.0, 9.0));
-    p.rect_stroke(front, CornerRadius::same(2), st, egui::StrokeKind::Middle);
-    // The square behind shows as an L above and to the right.
-    let back = vec![
-        pos2(front.left() + 3.0, front.top() - 3.0),
-        pos2(front.right() + 3.0, front.top() - 3.0),
-        pos2(front.right() + 3.0, front.bottom() - 3.0),
-    ];
-    p.add(Shape::line(back, st));
-    p.line_segment([pos2(front.left() + 2.5, front.center().y), pos2(front.right() - 2.5, front.center().y)], st);
-}
-
-fn draw_split_icon(p: &Painter, c: egui::Pos2, color: Color32) {
-    let r = Rect::from_center_size(c, vec2(14.0, 12.0));
-    p.rect_stroke(r, 1.5, Stroke::new(1.2, color), egui::StrokeKind::Inside);
-    p.line_segment([pos2(c.x, r.top()), pos2(c.x, r.bottom())], Stroke::new(1.2, color));
-}
-
-/// A page with a narrow strip on its right: the minimap.
-fn draw_minimap_icon(p: &Painter, c: egui::Pos2, color: Color32) {
-    let r = Rect::from_center_size(c, vec2(14.0, 12.0));
-    p.rect_stroke(r, 1.5, Stroke::new(1.2, color), egui::StrokeKind::Inside);
-    for (i, w) in [6.0, 4.0, 5.0].iter().enumerate() {
-        let y = r.top() + 3.5 + i as f32 * 2.5;
-        p.line_segment([pos2(r.left() + 2.5, y), pos2(r.left() + 2.5 + w, y)], Stroke::new(1.0, color));
-    }
-    p.line_segment([pos2(r.right() - 4.0, r.top()), pos2(r.right() - 4.0, r.bottom())], Stroke::new(1.0, color));
-}
-
-fn draw_search_icon(p: &Painter, c: egui::Pos2, color: Color32) {
-    let st = Stroke::new(1.6, color);
-    p.circle_stroke(pos2(c.x + 2.0, c.y - 2.0), 7.0, st);
-    p.line_segment([pos2(c.x - 3.0, c.y + 3.0), pos2(c.x - 9.0, c.y + 9.0)], Stroke::new(2.2, color));
-}
-
 fn draw_welcome(p: &Painter, rect: Rect, logo: &egui::TextureHandle, keys: &Keybindings) {
     let c = rect.center();
     let pal = theme::p();
-    let logo_rect = Rect::from_center_size(pos2(c.x, c.y - 150.0), vec2(104.0, 104.0));
+    let logo_rect = Rect::from_center_size(pos2(c.x, c.y - 170.0), vec2(104.0, 104.0));
     let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
     p.image(logo.id(), logo_rect, uv, Color32::WHITE);
     p.text(pos2(c.x, logo_rect.bottom() + 22.0), Align2::CENTER_CENTER, "Vex", FontId::proportional(24.0), pal.text_bright);
@@ -2032,7 +2456,9 @@ fn draw_welcome(p: &Painter, rect: Rect, logo: &egui::TextureHandle, keys: &Keyb
         pal.text_muted,
     );
     let rows = [
+        ("Show All Commands", keys.label(Command::CommandPalette)),
         ("Go to File", keys.label(Command::QuickOpen)),
+        ("Search in Files", keys.label(Command::FindInFiles)),
         ("Command Line", ":".into()),
         ("Open File", ":e <path>".into()),
         ("Toggle Sidebar", keys.label(Command::ToggleSidebar)),
@@ -2041,7 +2467,7 @@ fn draw_welcome(p: &Painter, rect: Rect, logo: &egui::TextureHandle, keys: &Keyb
         ("Save", format!(":w  /  {}", keys.label(Command::Save))),
     ];
     for (i, (label, keys)) in rows.iter().enumerate() {
-        let y = c.y + 4.0 + i as f32 * 30.0;
+        let y = c.y - 16.0 + i as f32 * 30.0;
         p.text(pos2(c.x - 12.0, y), Align2::RIGHT_CENTER, *label, FontId::proportional(13.0), pal.text_muted);
         // Each key combination as keycaps: "Ctrl+P" → [Ctrl] [P].
         let mut x = c.x + 12.0;

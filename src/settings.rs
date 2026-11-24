@@ -25,6 +25,8 @@ pub struct Settings {
     pub line_height: f32,
     pub cursor_style: String,
     pub cursor_blink: bool,
+    /// Vex draws its own title bar (logo, search, window buttons) instead of the system's.
+    pub custom_title_bar: bool,
     // Editor
     pub tab_size: usize,
     pub insert_spaces: bool,
@@ -33,6 +35,10 @@ pub struct Settings {
     pub line_numbers: bool,
     pub relative_line_numbers: bool,
     pub indent_guides: bool,
+    /// Highlight the bracket matching the one at the cursor.
+    pub bracket_matching: bool,
+    /// Typing an opening bracket or quote adds the closing one.
+    pub auto_close_brackets: bool,
     pub highlight_current_line: bool,
     pub render_whitespace: String,
     pub breadcrumbs: bool,
@@ -48,6 +54,8 @@ pub struct Settings {
     pub auto_save: bool,
     pub auto_save_delay_ms: u64,
     pub trim_trailing_whitespace: bool,
+    /// Reopen the files that were open last time in this folder.
+    pub restore_session: bool,
     // Terminal
     /// 0 means the editor font size.
     pub terminal_font_size: f32,
@@ -72,6 +80,7 @@ impl Default for Settings {
             line_height: 1.4,
             cursor_style: "block".into(),
             cursor_blink: false,
+            custom_title_bar: true,
             tab_size: 4,
             insert_spaces: true,
             word_wrap: false,
@@ -79,6 +88,8 @@ impl Default for Settings {
             line_numbers: true,
             relative_line_numbers: false,
             indent_guides: true,
+            bracket_matching: true,
+            auto_close_brackets: true,
             highlight_current_line: true,
             render_whitespace: "none".into(),
             breadcrumbs: true,
@@ -89,6 +100,7 @@ impl Default for Settings {
             auto_save: false,
             auto_save_delay_ms: 1000,
             trim_trailing_whitespace: false,
+            restore_session: true,
             terminal_font_size: 0.0,
             terminal_shell: String::new(),
             language_servers: BTreeMap::new(),
@@ -171,6 +183,7 @@ impl Settings {
     /// Returns warnings, such as an unknown theme or color name.
     pub fn apply_globals(&self) -> Vec<String> {
         buffer::set_indent(self.tab_size, self.insert_spaces);
+        crate::vim::set_auto_pairs(self.auto_close_brackets);
         theme::activate(&self.theme, &self.colors)
     }
 
@@ -191,6 +204,7 @@ impl Settings {
             ("Line height as a multiple of the font size", format!("line_height = {}", self.line_height)),
             ("Cursor in Normal mode: block, line or underline", format!("cursor_style = {}", quote(&self.cursor_style))),
             ("Blink the cursor", format!("cursor_blink = {}", b(self.cursor_blink))),
+            ("Vex's own title bar with the logo and a search box (false: the system's; needs a restart)", format!("custom_title_bar = {}", b(self.custom_title_bar))),
         ];
         let flush = |out: &mut String, lines: &mut Vec<(&str, String)>| {
             for (comment, line) in lines.drain(..) {
@@ -207,6 +221,8 @@ impl Settings {
             ("Show line numbers", format!("line_numbers = {}", b(self.line_numbers))),
             ("Number lines relative to the cursor", format!("relative_line_numbers = {}", b(self.relative_line_numbers))),
             ("Vertical lines at each indent level", format!("indent_guides = {}", b(self.indent_guides))),
+            ("Highlight the bracket matching the one at the cursor", format!("bracket_matching = {}", b(self.bracket_matching))),
+            ("Typing ( [ { or a quote adds the closing one", format!("auto_close_brackets = {}", b(self.auto_close_brackets))),
             ("Outline the line the cursor is on", format!("highlight_current_line = {}", b(self.highlight_current_line))),
             ("Show spaces and tabs: none, boundary (leading/trailing) or all", format!("render_whitespace = {}", quote(&self.render_whitespace))),
             ("Show the file path above the editor", format!("breadcrumbs = {}", b(self.breadcrumbs))),
@@ -226,6 +242,7 @@ impl Settings {
             ("Save files automatically after you stop typing", format!("auto_save = {}", b(self.auto_save))),
             ("How long to wait before auto-saving, in milliseconds", format!("auto_save_delay_ms = {}", self.auto_save_delay_ms)),
             ("Remove spaces at the ends of lines when saving", format!("trim_trailing_whitespace = {}", b(self.trim_trailing_whitespace))),
+            ("Reopen the files that were open last time in a folder", format!("restore_session = {}", b(self.restore_session))),
         ];
         flush(&mut out, &mut lines);
         out.push_str("\n# ---- Terminal ----\n");
@@ -315,6 +332,8 @@ impl Settings {
             "wrap" => &mut self.word_wrap,
             "minimap" | "mm" => &mut self.minimap,
             "indentguides" | "ig" => &mut self.indent_guides,
+            "matchbrackets" | "mb" => &mut self.bracket_matching,
+            "autopairs" | "ap" => &mut self.auto_close_brackets,
             "cursorline" | "cul" => &mut self.highlight_current_line,
             "cursorblink" => &mut self.cursor_blink,
             "breadcrumbs" => &mut self.breadcrumbs,

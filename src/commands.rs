@@ -21,6 +21,7 @@ fn is_mac() -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Command {
     QuickOpen,
+    CommandPalette,
     CommandLine,
     Save,
     ToggleSidebar,
@@ -35,6 +36,8 @@ pub enum Command {
     ZoomReset,
     OpenSettings,
     Keybindings,
+    FindInFiles,
+    ShowProblems,
     FocusPane(u8),
 }
 
@@ -60,10 +63,13 @@ const fn info(
 
 pub const COMMANDS: &[CommandInfo] = &[
     info(Command::QuickOpen, "quick_open", "Go to File", &["Cmd+P"], true),
-    info(Command::CommandLine, "command_line", "Command Line", &["Cmd+Shift+P"], true),
+    info(Command::CommandPalette, "command_palette", "Show All Commands", &["Cmd+Shift+P", "F1"], true),
+    info(Command::CommandLine, "command_line", "Command Line", &[], true),
     info(Command::Save, "save", "Save File", &["Cmd+S"], false),
     info(Command::ToggleSidebar, "toggle_sidebar", "Toggle Sidebar", &["Cmd+B"], true),
+    info(Command::FindInFiles, "find_in_files", "Search in Files", &["Cmd+Shift+F"], true),
     info(Command::ToggleTerminal, "toggle_terminal", "Toggle Terminal", &["Ctrl+`"], true),
+    info(Command::ShowProblems, "show_problems", "Show Problems", &["Cmd+Shift+M"], true),
     info(Command::ToggleWrap, "toggle_wrap", "Toggle Word Wrap", &["Alt+Z"], false),
     info(Command::ToggleMinimap, "toggle_minimap", "Toggle Minimap", &[], false),
     info(Command::SplitEditor, "split_editor", "Split Editor", &["Cmd+\\"], false),
@@ -398,7 +404,8 @@ pub(crate) mod tests {
         on_platform(false);
         let kb = Keybindings::default();
         assert_eq!(kb.lookup(Key::P, Modifiers::COMMAND), Some(Command::QuickOpen));
-        assert_eq!(kb.lookup(Key::P, Modifiers::COMMAND | Modifiers::SHIFT), Some(Command::CommandLine));
+        assert_eq!(kb.lookup(Key::P, Modifiers::COMMAND | Modifiers::SHIFT), Some(Command::CommandPalette));
+        assert_eq!(kb.lookup(Key::F1, Modifiers::NONE), Some(Command::CommandPalette));
         assert_eq!(kb.lookup(Key::Z, Modifiers::ALT), Some(Command::ToggleWrap));
         assert_eq!(kb.lookup(Key::Plus, Modifiers::COMMAND | Modifiers::SHIFT), Some(Command::ZoomIn));
         assert_eq!(kb.lookup(Key::Q, Modifiers::COMMAND), None);

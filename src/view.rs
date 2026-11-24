@@ -5,6 +5,7 @@ use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, CornerRadius, FontId, Rect, Response, Sense, Stroke, Ui};
 
 use crate::buffer::{tab_size, Buffer, Pos};
+use crate::git::LineChange;
 use crate::settings::Settings;
 use crate::syntax;
 use crate::theme;
@@ -104,6 +105,8 @@ pub struct View<'a> {
     pub focused: bool,
     /// Scroll so the cursor is visible.
     pub follow_cursor: bool,
+    /// Scroll so the cursor line is in the middle (after a jump).
+    pub center_cursor: bool,
     pub drag_anchor: &'a mut Option<Pos>,
     /// False during the "off" half of a cursor blink.
     pub cursor_visible: bool,
@@ -111,7 +114,7 @@ pub struct View<'a> {
 
 impl View<'_> {
     pub fn show(self, ui: &mut Ui, rect: Rect, id: egui::Id) -> Response {
-        let View { buf, vim, settings: st, focused, follow_cursor, drag_anchor, cursor_visible } = self;
+        let View { buf, vim, settings: st, focused, follow_cursor, center_cursor, drag_anchor, cursor_visible } = self;
         let resp = ui.interact(rect, id, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         let p = theme::p();
@@ -167,7 +170,9 @@ impl View<'_> {
         if follow_cursor {
             let so = (st.scroll_off as f32 * line_h).min(rect.height() / 3.0);
             let cy = (row_of_line[cur.line] + cur_row_in_line) as f32 * line_h;
-            if cy - so < buf.scroll_y {
+            if center_cursor {
+                buf.scroll_y = cy + line_h / 2.0 - rect.height() / 2.0;
+            } else if cy - so < buf.scroll_y {
                 buf.scroll_y = cy - so;
             } else if cy + line_h + so > buf.scroll_y + rect.height() {
                 buf.scroll_y = cy + line_h + so - rect.height();
@@ -236,6 +241,7 @@ impl View<'_> {
 
         let row_y = |r: usize| rect.top() + r as f32 * line_h - scroll_y;
         let cur_line_number = buf.cursor.line;
+        let brackets = if st.bracket_matching && focused { vim::bracket_pair(buf, buf.cursor, mode == Mode::Insert) } else { None };
         let mut l = first_line;
         while l < buf.line_count() && row_of_line[l] <= last_row {
             let line = &buf.lines[l];
@@ -279,6 +285,13 @@ impl View<'_> {
                         let r = Rect::from_x_y_ranges(x_of(lo)..=x_of(hi), y + 1.0..=y + line_h - 1.0);
                         text_painter.rect_filled(r, 2.0, p.search_match);
                         text_painter.rect_stroke(r, 2.0, Stroke::new(1.0, p.search_border), egui::StrokeKind::Inside);
+                    }
+                }
+                // The bracket at the cursor and its partner, boxed.
+                for bp in brackets.into_iter().flat_map(|(a, b)| [a, b]) {
+                    if bp.line == l && bp.col >= s && bp.col < e {
+                        let r = Rect::from_x_y_ranges(x_of(bp.col)..=x_of(bp.col + 1), y + 1.0..=y + line_h - 1.0);
+                        text_painter.rect(r, 2.0, p.text_muted.gamma_multiply(0.18), Stroke::new(1.0, p.text_muted.gamma_multiply(0.8)), egui::StrokeKind::Inside);
                     }
                 }
                 for k in 0..indent / tab_size() {
@@ -421,6 +434,37 @@ impl View<'_> {
             }
         }
 
+        // Git changes since the last commit: bars between the numbers and the text.
+        let bar_x = rect.left() + gutter_w - if show_numbers { 13.0 } else { 9.0 };
+        let gutter_painter = painter.with_clip_rect(Rect::from_min_max(rect.min, pos2(text_rect.left(), rect.bottom())));
+        let last_line = line_of_row(last_row.min(rows.saturating_sub(1)));
+        for change in &buf.git_changes {
+            let (start, end, color) = match *change {
+                LineChange::Added { start, end } => (start, end, theme::GUTTER_ADDED),
+                LineChange::Modified { start, end } => (start, end, theme::GUTTER_MODIFIED),
+                LineChange::Deleted { at } => {
+                    if (first_line..=last_line + 1).contains(&at) {
+                        // A small wedge on the line boundary where lines went.
+                        let y = if at < buf.line_count() { row_y(row_of_line[at]) } else { row_y(rows) };
+                        let tip = pos2(bar_x + 5.0, y);
+                        gutter_painter.add(egui::Shape::convex_polygon(
+                            vec![pos2(bar_x - 1.0, y - 4.0), tip, pos2(bar_x - 1.0, y + 4.0)],
+                            theme::GUTTER_DELETED,
+                            Stroke::NONE,
+                        ));
+                    }
+                    continue;
+                }
+            };
+            let (start, end) = (start.max(first_line), end.min(last_line + 1).min(buf.line_count()));
+            if start >= end {
+                continue;
+            }
+            let top = row_y(row_of_line[start]);
+            let bottom = row_y(row_of_line[end]);
+            gutter_painter.rect_filled(Rect::from_x_y_ranges(bar_x..=bar_x + 3.0, top + 1.0..=bottom - 1.0), CornerRadius::same(1), color);
+        }
+
         // Vertical scrollbar with a cursor marker, like VS Code's overview ruler.
         let total = max_scroll + rect.height();
         if total > rect.height() + 1.0 {
@@ -439,6 +483,17 @@ impl View<'_> {
             let alpha = if active { 0x99 } else { 0x55 };
             let sb = p.scrollbar;
             painter.rect_filled(thumb, CornerRadius::same((width / 2.0) as u8), Color32::from_rgba_unmultiplied(sb.r(), sb.g(), sb.b(), alpha));
+            // Git changes as ticks along the track's left edge.
+            for change in &buf.git_changes {
+                let (start, end, color) = match *change {
+                    LineChange::Added { start, end } => (start, end, theme::GUTTER_ADDED),
+                    LineChange::Modified { start, end } => (start, end, theme::GUTTER_MODIFIED),
+                    LineChange::Deleted { at } => (at.min(buf.line_count() - 1), at.min(buf.line_count() - 1) + 1, theme::GUTTER_DELETED),
+                };
+                let y0 = rect.top() + row_of_line[start] as f32 / rows.max(1) as f32 * rect.height();
+                let y1 = rect.top() + row_of_line[end.min(buf.line_count())] as f32 / rows.max(1) as f32 * rect.height();
+                painter.rect_filled(Rect::from_x_y_ranges(track.left() + 1.0..=track.left() + 3.0, y0..=y1.max(y0 + 2.0)), 0.0, color);
+            }
             let cur_row = row_of_line[c.line] + cur_row_in_line;
             let my = rect.top() + cur_row as f32 / rows.max(1) as f32 * rect.height();
             painter.rect_filled(Rect::from_min_size(pos2(track.right() - 12.0, my), vec2(9.0, 2.0)), CornerRadius::same(1), p.cursor);

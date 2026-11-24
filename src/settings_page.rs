@@ -252,6 +252,12 @@ impl SettingsPage {
             combo(ui, "cursor-style", &mut st.cursor_style, &options)
         });
         changed |= rows.row(ui, "Cursor blinking", "Blink the cursor when you stop typing.", |ui| ui.checkbox(&mut st.cursor_blink, "Blink").changed());
+        changed |= rows.row(
+            ui,
+            "Title bar",
+            "Vex's own title bar has the logo, a search box and the window buttons. Turn it off to use your system's title bar instead (takes effect when Vex restarts).",
+            |ui| ui.checkbox(&mut st.custom_title_bar, "Use Vex's title bar").changed(),
+        );
         changed
     }
 
@@ -407,6 +413,11 @@ fn editor(ui: &mut Ui, rows: &mut Rows, st: &mut Settings) -> bool {
         a || b
     });
     changed |= rows.row(ui, "Indent guides", "Thin vertical lines at each indentation level.", |ui| ui.checkbox(&mut st.indent_guides, "Show indent guides").changed());
+    changed |= rows.row(ui, "Brackets", "Highlight matching brackets, and close brackets and quotes as you type them.", |ui| {
+        let a = ui.checkbox(&mut st.bracket_matching, "Highlight the matching bracket").changed();
+        let b = ui.checkbox(&mut st.auto_close_brackets, "Auto-close brackets and quotes").changed();
+        a || b
+    });
     changed |= rows.row(ui, "Highlight current line", "Outline the line the cursor is on.", |ui| {
         ui.checkbox(&mut st.highlight_current_line, "Highlight").changed()
     });
@@ -448,6 +459,9 @@ fn files(ui: &mut Ui, rows: &mut Rows, st: &mut Settings) -> bool {
     });
     changed |= rows.row(ui, "Trim trailing whitespace", "Remove spaces and tabs at the ends of lines when saving.", |ui| {
         ui.checkbox(&mut st.trim_trailing_whitespace, "Trim on save").changed()
+    });
+    changed |= rows.row(ui, "Restore open files", "Reopen the files you had open the last time you worked in this folder.", |ui| {
+        ui.checkbox(&mut st.restore_session, "Restore the previous session").changed()
     });
     changed
 }

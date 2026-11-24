@@ -160,9 +160,43 @@ pub fn fuzzy_score(query: &str, candidate: &str) -> Option<i32> {
     Some(score * 100 - cand.len() as i32)
 }
 
+/// Which chars of `candidate` (char indices) a fuzzy match of `query` uses,
+/// for highlighting: the query as one piece if it appears (at a word start if
+/// it can), otherwise a run of single chars that favors word starts.
+pub fn fuzzy_positions(query: &str, candidate: &str) -> Option<Vec<usize>> {
+    let cand: Vec<char> = candidate.to_lowercase().chars().collect();
+    let q: Vec<char> = query.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+    let word_start = |i: usize| i == 0 || matches!(cand[i - 1], ' ' | '/' | '_' | '-' | '.' | ':');
+    if q.is_empty() {
+        return Some(Vec::new());
+    }
+    let whole: Vec<usize> = (0..cand.len().saturating_sub(q.len() - 1)).filter(|&i| cand[i..i + q.len()] == q[..]).collect();
+    if let Some(&i) = whole.iter().find(|&&i| word_start(i)).or(whole.first()) {
+        return Some((i..i + q.len()).collect());
+    }
+    let mut out: Vec<usize> = Vec::new();
+    let mut from = 0;
+    for &c in &q {
+        let next = out.last().map(|l| l + 1).filter(|&i| i >= from && cand.get(i) == Some(&c));
+        let found = next
+            .or_else(|| (from..cand.len()).find(|&i| cand[i] == c && word_start(i)))
+            .or_else(|| (from..cand.len()).find(|&i| cand[i] == c))?;
+        out.push(found);
+        from = found + 1;
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::fuzzy_score;
+    use super::{fuzzy_positions, fuzzy_score};
+
+    #[test]
+    fn positions_prefer_word_starts() {
+        assert_eq!(fuzzy_positions("tt", "Toggle Terminal"), Some(vec![0, 7]));
+        assert_eq!(fuzzy_positions("ter", "Toggle Terminal"), Some(vec![7, 8, 9]));
+        assert_eq!(fuzzy_positions("xyz", "Toggle Terminal"), None);
+    }
 
     #[test]
     fn prefers_file_name_matches() {

@@ -6,6 +6,8 @@ A fast code editor written in Rust. It looks like VS Code and edits like Vim.
 
 Vex draws its UI on the GPU with [egui](https://github.com/emilk/egui). It has the VS Code layout (activity bar, file explorer, tabs, breadcrumbs, minimap, status bar) in VS Code's Dark Modern and Light Modern colors, with the classic Dark+ and Light+ also available. A modal editing engine is built in from the start.
 
+Vex draws its own title bar, like VS Code: the logo, a search box in the middle (click it to go to a file), buttons to show or hide the sidebar and bottom panel, and the window buttons. Drag it to move the window and double-click it to maximize; the window's edges resize it. To use your system's title bar instead, turn off Settings → Appearance → Title bar (`custom_title_bar = false`) and restart Vex.
+
 ## Download
 
 Prebuilt packages for each release are on the [Releases page](https://github.com/i1288/Vex/releases/latest):
@@ -50,7 +52,7 @@ The status bar badge shows the current mode: **NORMAL**, **INSERT**, **VISUAL** 
 | `/ ?` `n N` `* #` | search (regex, smartcase) |
 | `v V` | visual / visual line |
 | `gt gT` | next / previous tab |
-| `]d` `[d` | next / previous syntax error |
+| `]d` `[d` | next / previous error or warning |
 | `Ctrl-w h/l` `Ctrl-w w` | focus pane left / right / next |
 | `Ctrl-w v` `Ctrl-w q` `Ctrl-w o` | split / close / keep only this pane |
 | counts | `3dw`, `5j`, `2dd` … |
@@ -74,8 +76,10 @@ On macOS, use Cmd wherever this README says Ctrl, except for ``Ctrl+` `` (termin
 
 | App shortcuts | |
 |---|---|
+| `Ctrl+Shift+P` / `F1` | command palette: every command, plus the theme picker |
 | `Ctrl+P` | go to file (fuzzy) |
-| `Ctrl+Shift+P` | command line |
+| `Ctrl+Shift+F` | search in files |
+| `Ctrl+Shift+M` | problems panel |
 | `Ctrl+S` | save |
 | `Ctrl+B` | toggle sidebar |
 | `Ctrl+\` | split editor |
@@ -89,12 +93,40 @@ On macOS, use Cmd wherever this README says Ctrl, except for ``Ctrl+` `` (termin
 
 Yanks are copied to the system clipboard, and `Ctrl+V` pastes from it. In the editor, `Ctrl+C` copies the selection in visual mode and acts as `Esc` otherwise.
 
+In Insert mode, `(`, `[`, `{` and quotes add their closing half, typing the closing half steps over it, and `Backspace` in an empty pair removes both. The bracket at the cursor and its partner are highlighted. Turn these off in Settings → Editor → Brackets.
+
+## Command palette
+
+`Ctrl+Shift+P` (or `F1`) lists every command by name with its shortcut. Type a few letters to filter (`tt` finds *Toggle Terminal*); the ones you used last are at the top. Besides the app commands it can toggle line numbers, relative numbers, indent guides and breadcrumbs, save all files, reveal the current file in the explorer, and open `settings.toml` or `init.vex`. **Color Theme** lists the themes and previews each one as you move through them with the arrow keys; `Enter` keeps it and `Esc` goes back.
+
+## Search in files
+
+The search icon in the activity bar (or `Ctrl+Shift+F`) opens the **Search** view. Results appear as you type, grouped by file, with counts. The toggles in the box are **Aa** (match case), **ab** (whole word) and **.\*** (regular expression). Click a result to open the file at that line; the matches stay highlighted in the editor, so `n` and `N` step through them. Selecting text in visual mode before `Ctrl+Shift+F` searches for it. Build folders (`target`, `node_modules`, `.git`, …) and binary files are skipped.
+
+## Git
+
+In a git repository, Vex shows what changed since the last commit:
+
+- **Gutter:** a green bar beside added lines, a blue bar beside changed lines, and a red wedge where lines were deleted. They update as you type, and also show as ticks on the scrollbar.
+- **Explorer:** changed files are colored, with **M** (modified), **U** (untracked), **A** (added), **D** (deleted) or **R** (renamed) on the right. Folders with changes inside get a dot.
+- **Status bar:** the current branch, with `↑` / `↓` counts when there are commits to push or pull.
+
+Status refreshes every few seconds, after saving, and when you come back to the window. It needs `git` on your PATH.
+
+## Problems
+
+The bottom panel has a **Problems** tab next to the terminal, listing every syntax and type error in the open files, grouped by file. Click one to go to it. Open it with `Ctrl+Shift+M` or by clicking the error count in the status bar.
+
+## Sessions
+
+When you close Vex, it remembers the files you had open in that folder: the panes, the tabs and where the cursor was in each. Opening the folder again brings them back. Opening a single file (`vex file.rs`) starts fresh. Turn it off in Settings → Files, or with `restore_session = false`.
+
 ## Syntax checking
 
 Vex underlines syntax errors as you type in **Rust, Python, JavaScript, TypeScript/TSX, C, C++, Go, Java, JSON, Bash, CSS, HTML, TOML and YAML**. It uses [tree-sitter](https://tree-sitter.github.io/) grammars built into Vex, so nothing extra needs to be installed. Checking runs on a background thread a moment after you stop typing, and only for files that changed. A 9,000-line file takes about 20 ms.
 
 - A red squiggle marks each error. Hover over it, or put the cursor on its line, to read the message in the status bar.
-- The status bar shows the error count for the current file. Click it, or use `]d` / `[d`, to jump to the next or previous error.
+- The status bar shows the error count for the current file. Click it to open the Problems panel, or use `]d` / `[d` to jump to the next or previous error.
 - Files with errors get a red tab name and red marks on the scrollbar.
 - Turn it off in Settings → Editor → Syntax checking, with `syntax_check = false`, or with `:set nosyntaxcheck`.
 
@@ -158,7 +190,7 @@ Commands useful in mappings: `:terminal`, `:files` (Go to File), `:sidebar`, `:k
 
 ## Terminal
 
-``Ctrl+` `` opens your `$SHELL` in a panel below the editor, started in the workspace folder. Press it again to hide the panel, or click the editor to switch focus. It's an xterm-compatible terminal with 256-color and true-color support, so full-screen programs like `less`, `htop` and `vim` work. While it has focus, `Ctrl+C` interrupts the running program, `Ctrl+V` pastes, and the mouse wheel scrolls back through history.
+``Ctrl+` `` opens your `$SHELL` in a panel below the editor (the Terminal tab, next to Problems), started in the workspace folder. Press it again to hide the panel, or click the editor to switch focus. It's an xterm-compatible terminal with 256-color and true-color support, so full-screen programs like `less`, `htop` and `vim` work. While it has focus, `Ctrl+C` interrupts the running program, `Ctrl+V` pastes, and the mouse wheel scrolls back through history.
 
 ## Settings
 
@@ -166,8 +198,8 @@ The **Settings page** (gear icon at the bottom left, `Ctrl+,`, or `:settings`) h
 
 - **Appearance:** interface size, editor font (any monospace font on your computer), font size, line height, cursor style and blinking
 - **Theme & Colors:** pick a theme from preview cards, change any single color with a color picker, or save the result as a new theme
-- **Editor:** tab size, spaces or tabs, word wrap, minimap, line numbers (absolute or relative), indent guides, current-line highlight, visible whitespace, breadcrumbs, scroll margin
-- **Files:** auto-save (with a delay), trim trailing whitespace on save
+- **Editor:** tab size, spaces or tabs, word wrap, minimap, line numbers (absolute or relative), indent guides, bracket matching and auto-closing, current-line highlight, visible whitespace, breadcrumbs, scroll margin
+- **Files:** auto-save (with a delay), trim trailing whitespace on save, restoring the open files
 - **Terminal:** font size and which shell to run
 - **Keyboard:** links to the Keyboard Shortcuts panel and to `init.vex`
 
@@ -207,6 +239,11 @@ src/
   diagnostics.rs  tree-sitter syntax checking on a background thread
   lsp.rs       language server client for type checking
   explorer.rs  file tree and fuzzy file finder
+  search.rs    search in files (the Search view), on a background thread
+  palette.rs   the command palette and theme picker
+  git.rs       git status, branch, and line diffs against HEAD
+  session.rs   saving and reopening the open files per folder
+  icons.rs     painted icons and small shared widgets
   settings.rs  settings file and :set options
   settings_page.rs  the Settings page
   keymap.rs    vim key notation and mapping table

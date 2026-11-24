@@ -554,6 +554,44 @@ fn matching_close(buf: &Buffer, start: Pos, open: char, close: char) -> Option<P
     }
 }
 
+/// Pairs closed automatically in Insert mode.
+const AUTO_PAIRS_LIST: [(char, char); 6] = [('(', ')'), ('[', ']'), ('{', '}'), ('"', '"'), ('\'', '\''), ('`', '`')];
+
+/// Type `c` at `at` in Insert mode with auto-pairs on: an opening bracket or
+/// quote brings its closing half, and typing a closing half that is already
+/// next to the cursor steps over it. Returns the new cursor.
+fn type_with_pairs(buf: &mut Buffer, at: Pos, c: char) -> Pos {
+    let line = &buf.lines[at.line];
+    let next = line.get(at.col).copied();
+    let prev = at.col.checked_sub(1).map(|i| line[i]);
+    let is_quote = matches!(c, '"' | '\'' | '`');
+    let closes = AUTO_PAIRS_LIST.iter().any(|&(_, cl)| cl == c);
+    if closes && next == Some(c) && (!is_quote || prev != Some('\\')) {
+        return Pos::new(at.line, at.col + 1);
+    }
+    // Only pair in front of a space, the line end or a closing bracket, so
+    // typing before a word stays plain.
+    let next_ok = next.is_none_or(|n| n.is_whitespace() || matches!(n, ')' | ']' | '}' | ',' | ';' | ':'));
+    let pair = AUTO_PAIRS_LIST.iter().find(|&&(o, _)| o == c).map(|&(_, cl)| cl);
+    let ok = match pair {
+        Some(_) if !next_ok => false,
+        // A quote after a letter is an apostrophe (don't), and Rust's ' is
+        // mostly lifetimes (&'a), so those stay single.
+        Some(_) if is_quote => {
+            !prev.is_some_and(|p| p.is_alphanumeric() || p == c || p == '\\') && !(c == '\'' && buf.extension() == "rs")
+        }
+        Some(_) => true,
+        None => false,
+    };
+    match pair.filter(|_| ok) {
+        Some(cl) => {
+            let end = buf.insert(at, &format!("{c}{cl}"));
+            Pos::new(end.line, end.col - 1)
+        }
+        None => buf.insert(at, &c.to_string()),
+    }
+}
+
 fn match_pair(buf: &Buffer, from: Pos) -> Option<Pos> {
     let line = &buf.lines[from.line];
     let (col, c) = line
@@ -571,6 +609,33 @@ fn match_pair(buf: &Buffer, from: Pos) -> Option<Pos> {
         }
     }
     None
+}
+
+thread_local! {
+    static AUTO_PAIRS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether typing an opening bracket or quote in Insert mode adds the closing one.
+pub fn set_auto_pairs(on: bool) {
+    AUTO_PAIRS.with(|a| a.set(on));
+}
+
+fn auto_pairs() -> bool {
+    AUTO_PAIRS.with(|a| a.get())
+}
+
+/// The bracket at `pos` (or, in Insert mode, just before it) and its partner,
+/// for highlighting. Gives up on brackets more than `MAX_LINES` lines apart.
+pub fn bracket_pair(buf: &Buffer, pos: Pos, insert: bool) -> Option<(Pos, Pos)> {
+    const MAX_LINES: usize = 3000;
+    let line = buf.lines.get(pos.line)?;
+    let at = |col: usize| line.get(col).filter(|c| PAIRS[..3].iter().any(|(o, cl)| *c == o || *c == cl)).map(|_| col);
+    let col = at(pos.col).or_else(|| if insert { pos.col.checked_sub(1).and_then(at) } else { None })?;
+    let p = Pos::new(pos.line, col);
+    let c = line[col];
+    let (o, cl) = *PAIRS[..3].iter().find(|(o, cl)| c == *o || c == *cl)?;
+    let other = if c == o { matching_close(buf, p, o, cl)? } else { enclosing_pair(buf, p, o, cl)?.0 };
+    (other.line.abs_diff(p.line) <= MAX_LINES).then_some((p, other))
 }
 
 /// Compile a search pattern. Smartcase: case-insensitive unless the pattern has
@@ -1503,6 +1568,7 @@ impl Vim {
                 buf.want_col = buf.visual_col(buf.cursor.line, buf.cursor.col);
                 return;
             }
+            Key::Char(c) if auto_pairs() => buf.cursor = type_with_pairs(buf, cur, c),
             Key::Char(c) => buf.cursor = buf.insert(cur, &c.to_string()),
             Key::Tab => {
                 let v = buf.visual_col(cur.line, cur.col);
@@ -1539,7 +1605,16 @@ impl Vim {
                 }
             }
             Key::Backspace => {
-                if cur.col > 0 {
+                let line = &buf.lines[cur.line];
+                let empty_pair = cur.col > 0
+                    && auto_pairs()
+                    && AUTO_PAIRS_LIST.iter().any(|&(o, c)| line[cur.col - 1] == o && line.get(cur.col) == Some(&c));
+                if empty_pair {
+                    // Deleting the opening half of "()" deletes the pair.
+                    let a = Pos::new(cur.line, cur.col - 1);
+                    buf.delete(a, Pos::new(cur.line, cur.col + 1));
+                    buf.cursor = a;
+                } else if cur.col > 0 {
                     let line = &buf.lines[cur.line];
                     let all_spaces = line[..cur.col].iter().all(|c| *c == ' ');
                     let n = if all_spaces { (cur.col - 1) % tab_size() + 1 } else { 1 };
@@ -1942,6 +2017,43 @@ fn shift_line(buf: &mut Buffer, line: usize, right: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn text(buf: &Buffer) -> String {
+        buf.lines.iter().map(|l| l.iter().collect::<String>()).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn auto_pairs_close_skip_and_delete() {
+        set_auto_pairs(true);
+        let (b, _) = run("", "ifoo(x<esc>");
+        assert_eq!(text(&b), "foo(x)");
+        let (b, _) = run("", "ifoo(x)<esc>");
+        assert_eq!(text(&b), "foo(x)", "typing the closer steps over it");
+        let (b, _) = run("", "ia[<bs>b<esc>");
+        assert_eq!(text(&b), "ab", "backspace removes an empty pair");
+        let (b, _) = run("", "is = \"hi\";<esc>");
+        assert_eq!(text(&b), "s = \"hi\";");
+        let (b, _) = run("word", "i(<esc>");
+        assert_eq!(text(&b), "(word", "no pair in front of a word");
+        let (b, _) = run("", "idon't<esc>");
+        assert_eq!(text(&b), "don't", "apostrophes stay single");
+        let (b, _) = run("", "a(x<esc>$.");
+        assert_eq!(text(&b), "(x)(x)", "dot repeat types the same");
+        let (b, _) = run("", "ifn f() {<cr>x<esc>");
+        assert_eq!(text(&b), "fn f() {\n    x\n}", "Enter between braces opens a block");
+        set_auto_pairs(false);
+        let (b, _) = run("", "ifoo(<esc>");
+        assert_eq!(text(&b), "foo(");
+    }
+
+    #[test]
+    fn bracket_pairs_for_highlighting() {
+        let b = Buffer::from_str("f(a[1], {b})\n");
+        assert_eq!(bracket_pair(&b, Pos::new(0, 1), false), Some((Pos::new(0, 1), Pos::new(0, 11))));
+        assert_eq!(bracket_pair(&b, Pos::new(0, 11), false), Some((Pos::new(0, 11), Pos::new(0, 1))));
+        assert_eq!(bracket_pair(&b, Pos::new(0, 6), true), Some((Pos::new(0, 5), Pos::new(0, 3))), "insert mode looks behind");
+        assert_eq!(bracket_pair(&b, Pos::new(0, 2), false), None);
+    }
 
     fn run(text: &str, keys: &str) -> (Buffer, Vim) {
         let mut buf = Buffer::from_str(text);
