@@ -51,15 +51,22 @@ fn main() -> eframe::Result {
     let root = root.canonicalize().unwrap_or(root);
 
     let icon = eframe::icon_data::from_png_bytes(ICON_PNG).expect("bundled icon is a valid PNG");
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Vex")
-            .with_app_id("vex")
-            .with_icon(std::sync::Arc::new(icon))
-            .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([480.0, 320.0]),
-        ..Default::default()
-    };
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("Vex")
+        .with_app_id("vex")
+        .with_icon(std::sync::Arc::new(icon))
+        .with_inner_size([1280.0, 800.0])
+        .with_min_inner_size([480.0, 320.0]);
+    // Vex's own title bar: on macOS it sits under the native window buttons;
+    // elsewhere it replaces the system's title bar.
+    if settings::load().map_or(true, |s| s.custom_title_bar) {
+        viewport = if cfg!(target_os = "macos") {
+            viewport.with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false)
+        } else {
+            viewport.with_decorations(false)
+        };
+    }
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native(
         "Vex",
         options,

@@ -25,6 +25,8 @@ pub struct Settings {
     pub line_height: f32,
     pub cursor_style: String,
     pub cursor_blink: bool,
+    /// Vex draws its own title bar (logo, search, window buttons) instead of the system's.
+    pub custom_title_bar: bool,
     // Editor
     pub tab_size: usize,
     pub insert_spaces: bool,
@@ -78,6 +80,7 @@ impl Default for Settings {
             line_height: 1.4,
             cursor_style: "block".into(),
             cursor_blink: false,
+            custom_title_bar: true,
             tab_size: 4,
             insert_spaces: true,
             word_wrap: false,
@@ -201,6 +204,7 @@ impl Settings {
             ("Line height as a multiple of the font size", format!("line_height = {}", self.line_height)),
             ("Cursor in Normal mode: block, line or underline", format!("cursor_style = {}", quote(&self.cursor_style))),
             ("Blink the cursor", format!("cursor_blink = {}", b(self.cursor_blink))),
+            ("Vex's own title bar with the logo and a search box (false: the system's; needs a restart)", format!("custom_title_bar = {}", b(self.custom_title_bar))),
         ];
         let flush = |out: &mut String, lines: &mut Vec<(&str, String)>| {
             for (comment, line) in lines.drain(..) {

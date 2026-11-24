@@ -252,6 +252,12 @@ impl SettingsPage {
             combo(ui, "cursor-style", &mut st.cursor_style, &options)
         });
         changed |= rows.row(ui, "Cursor blinking", "Blink the cursor when you stop typing.", |ui| ui.checkbox(&mut st.cursor_blink, "Blink").changed());
+        changed |= rows.row(
+            ui,
+            "Title bar",
+            "Vex's own title bar has the logo, a search box and the window buttons. Turn it off to use your system's title bar instead (takes effect when Vex restarts).",
+            |ui| ui.checkbox(&mut st.custom_title_bar, "Use Vex's title bar").changed(),
+        );
         changed
     }
 

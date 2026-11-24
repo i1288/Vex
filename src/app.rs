@@ -31,6 +31,7 @@ use crate::vim::{Action, Key, Mode, Vim};
 
 const UI_SIZE: f32 = 13.0;
 const TAB_GAP: f32 = 3.0;
+const TITLE_BAR_H: f32 = 34.0;
 const TAB_RADIUS: u8 = 7;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -105,6 +106,8 @@ pub struct VexApp {
     keys: Keybindings,
     keys_panel: Option<KeysPanel>,
     settings_page: Option<SettingsPage>,
+    /// Vex draws the title bar (decided at startup, see main.rs).
+    custom_title_bar: bool,
     /// Settings changed in the page and not yet written to disk, and when.
     settings_dirty_at: Option<f64>,
 }
@@ -166,9 +169,11 @@ impl VexApp {
             keys: Keybindings::default(),
             keys_panel: None,
             settings_page: None,
+            custom_title_bar: false,
             settings_dirty_at: None,
         };
         app.reload_settings(&cc.egui_ctx);
+        app.custom_title_bar = app.settings.custom_title_bar;
         app.load_keybindings();
         app.load_init_script();
         if let Some(f) = file {
@@ -1231,18 +1236,160 @@ impl VexApp {
 
     // ---- chrome --------------------------------------------------------
 
+    /// Vex's own title bar: the logo, a search box in the middle that opens Go
+    /// to File, layout toggles, and the window buttons. Dragging it moves the
+    /// window; double-clicking maximizes.
+    fn title_bar(&mut self, ui: &mut Ui) {
+        let rect = ui.max_rect();
+        let p = theme::p();
+        let ctx = ui.ctx().clone();
+        let painter = ui.painter().clone();
+        painter.line_segment([rect.left_bottom() - vec2(0.0, 0.5), rect.right_bottom() - vec2(0.0, 0.5)], Stroke::new(1.0, p.separator));
+        let mac = cfg!(target_os = "macos");
+        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+
+        // The empty parts of the bar move the window. Added first, so the
+        // buttons on top of it get their clicks.
+        let drag = ui.interact(rect, ui.scope_id().with("title-drag"), Sense::click_and_drag());
+        if drag.drag_started_by(egui::PointerButton::Primary) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+        if drag.double_clicked() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+        }
+
+        // The logo, lined up with the activity bar's icons (after macOS's own buttons).
+        let logo_x = if mac { rect.left() + 86.0 } else { rect.left() + 24.0 };
+        let logo = Rect::from_center_size(pos2(logo_x, rect.center().y), vec2(20.0, 20.0));
+        painter.image(self.logo.id(), logo, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        ui.interact(logo.expand(4.0), ui.scope_id().with("title-logo"), Sense::hover())
+            .on_hover_text(format!("Vex {}", env!("CARGO_PKG_VERSION")));
+
+        // Window buttons on the right (macOS has its own on the left).
+        let mut right = rect.right();
+        if !mac {
+            let buttons: [(&str, &str); 3] = [("close", "Close"), ("max", if maximized { "Restore" } else { "Maximize" }), ("min", "Minimize")];
+            for (kind, tip) in buttons {
+                let r = Rect::from_min_max(pos2(right - 46.0, rect.top()), pos2(right, rect.bottom()));
+                right = r.left();
+                let resp = ui.interact(r, ui.scope_id().with(("win", kind)), Sense::click());
+                let close_hot = kind == "close" && resp.hovered();
+                if close_hot {
+                    painter.rect_filled(r, 0.0, Color32::from_rgb(0xc4, 0x2b, 0x1c));
+                } else if resp.hovered() {
+                    painter.rect_filled(r, 0.0, p.list_hover);
+                }
+                let color = if close_hot { Color32::WHITE } else { p.text_ui };
+                match kind {
+                    "close" => draw_x(&painter, r.center(), 5.0, color),
+                    "max" => draw_maximize_icon(&painter, r.center(), color, maximized),
+                    _ => draw_minimize_icon(&painter, r.center(), color),
+                }
+                if resp.on_hover_text(tip).clicked() {
+                    match kind {
+                        "close" => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                        "max" => ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized)),
+                        _ => ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true)),
+                    }
+                }
+            }
+            right -= 8.0;
+        }
+
+        // Layout toggles: sidebar and bottom panel.
+        let toggles: [(&str, bool, String); 2] = [
+            ("sidebar", self.show_sidebar, format!("Toggle Sidebar ({})", self.keys.label(Command::ToggleSidebar))),
+            ("panel", self.show_terminal, format!("Toggle Panel ({})", self.keys.label(Command::ToggleTerminal))),
+        ];
+        for (kind, on, tip) in toggles.into_iter().rev() {
+            let r = Rect::from_center_size(pos2(right - 16.0, rect.center().y), vec2(26.0, 24.0));
+            right = r.left() - 2.0;
+            let resp = ui.interact(r, ui.scope_id().with(("layout", kind)), Sense::click());
+            if resp.hovered() {
+                painter.rect_filled(r, CornerRadius::same(5), p.list_hover);
+            }
+            let color = if resp.hovered() { p.text_bright } else { p.text_muted };
+            if kind == "sidebar" {
+                draw_sidebar_toggle_icon(&painter, r.center(), color, on);
+            } else {
+                draw_panel_toggle_icon(&painter, r.center(), color, on);
+            }
+            if resp.on_hover_text(tip).clicked() {
+                match kind {
+                    "sidebar" => self.show_sidebar = !self.show_sidebar,
+                    _ if self.show_terminal => {
+                        self.show_terminal = false;
+                        self.terminal_focused = false;
+                    }
+                    _ => self.show_terminal = true,
+                }
+            }
+        }
+
+        // The search box in the middle, like VS Code's command center.
+        let w = (rect.width() * 0.38).clamp(200.0, 520.0);
+        let center = Rect::from_center_size(rect.center(), vec2(w, 24.0));
+        let center = center.translate(vec2((logo.right() + 16.0 - center.left()).max(0.0), 0.0));
+        if center.right() < right - 8.0 {
+            let resp = ui.interact(center, ui.scope_id().with("command-center"), Sense::click());
+            let fill = if resp.hovered() { p.list_hover } else { p.input_bg };
+            painter.rect(center, CornerRadius::same(6), fill, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+            let label = galley(&ctx, self.explorer.root_name(), 12.5, p.text_ui);
+            let total = 14.0 + 6.0 + label.size().x;
+            let x0 = center.center().x - total / 2.0;
+            draw_search_icon_small(&painter, pos2(x0 + 6.0, center.center().y), p.text_muted);
+            painter.galley(pos2(x0 + 20.0, center.center().y - label.size().y / 2.0), label, p.text_ui);
+            let tip = format!(
+                "Go to File ({})  ·  Commands ({})",
+                self.keys.label(Command::QuickOpen),
+                self.keys.label(Command::CommandPalette)
+            );
+            if resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                self.run_command(&ctx, Command::QuickOpen);
+            }
+        }
+    }
+
+    /// Without the system's title bar there is no system border to resize by,
+    /// so the window's edges do it.
+    fn resize_edges(&mut self, ctx: &egui::Context) {
+        use egui::{CursorIcon, ResizeDirection as Dir};
+        const EDGE: f32 = 5.0;
+        if !self.custom_title_bar || cfg!(target_os = "macos") || ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
+            return;
+        }
+        let screen = ctx.content_rect();
+        let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else { return };
+        let (l, r) = (pos.x - screen.left() < EDGE, screen.right() - pos.x < EDGE);
+        let (t, b) = (pos.y - screen.top() < EDGE, screen.bottom() - pos.y < EDGE);
+        let dir = match (l, r, t, b) {
+            (true, _, true, _) => Dir::NorthWest,
+            (_, true, true, _) => Dir::NorthEast,
+            (true, _, _, true) => Dir::SouthWest,
+            (_, true, _, true) => Dir::SouthEast,
+            (true, ..) => Dir::West,
+            (_, true, ..) => Dir::East,
+            (_, _, true, _) => Dir::North,
+            (.., true) => Dir::South,
+            _ => return,
+        };
+        let cursor = match dir {
+            Dir::North | Dir::South => CursorIcon::ResizeVertical,
+            Dir::East | Dir::West => CursorIcon::ResizeHorizontal,
+            Dir::NorthWest | Dir::SouthEast => CursorIcon::ResizeNwSe,
+            Dir::NorthEast | Dir::SouthWest => CursorIcon::ResizeNeSw,
+        };
+        ctx.set_cursor_icon(cursor);
+        if ctx.input(|i| i.pointer.primary_pressed()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
+        }
+    }
+
     fn activity_bar(&mut self, ui: &mut Ui) {
         let rect = ui.max_rect();
         let p = theme::p();
 
-        // The Vex logo in the top-left corner.
-        let logo_cell = Rect::from_min_size(rect.min, vec2(48.0, 50.0));
-        let logo = Rect::from_center_size(logo_cell.center(), vec2(26.0, 26.0));
-        ui.painter().image(self.logo.id(), logo, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-        ui.interact(logo_cell, ui.scope_id().with("act-logo"), Sense::hover())
-            .on_hover_text(format!("Vex {}", env!("CARGO_PKG_VERSION")));
-
-        let item = |i: usize| Rect::from_min_size(pos2(rect.left(), logo_cell.bottom() + i as f32 * 46.0), vec2(48.0, 46.0));
+        let item = |i: usize| Rect::from_min_size(pos2(rect.left(), rect.top() + 4.0 + i as f32 * 46.0), vec2(48.0, 46.0));
         let explorer_on = self.show_sidebar && self.sidebar_view == SidebarView::Explorer;
         let search_on = self.show_sidebar && self.sidebar_view == SidebarView::Search;
         let explorer = activity_item(ui, item(0), "act-explorer", explorer_on, &p, draw_files_icon);
@@ -2217,6 +2364,13 @@ impl eframe::App for VexApp {
         self.handle_close_request(&ctx);
         self.update_title(&ctx);
 
+        if self.custom_title_bar {
+            egui::Panel::top("titlebar")
+                .exact_size(TITLE_BAR_H)
+                .resizable(false)
+                .frame(Frame::NONE.fill(theme::p().activity_bg))
+                .show(ui, |ui| self.title_bar(ui));
+        }
         egui::Panel::bottom("status")
             .exact_size(22.0)
             .resizable(false)
@@ -2251,6 +2405,7 @@ impl eframe::App for VexApp {
             }
         });
         self.save_settings_if_idle(&ctx);
+        self.resize_edges(&ctx);
 
         self.quick_open_overlay(&ctx);
         self.palette_overlay(&ctx);

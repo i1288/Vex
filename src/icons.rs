@@ -280,3 +280,56 @@ pub fn draw_info_icon(p: &Painter, c: egui::Pos2, color: Color32) {
     p.line_segment([pos2(c.x, c.y - 0.5), pos2(c.x, c.y + 3.0)], Stroke::new(1.4, color));
     p.circle_filled(pos2(c.x, c.y - 2.8), 0.9, color);
 }
+
+/// Window button: minimize (a dash).
+pub fn draw_minimize_icon(p: &Painter, c: egui::Pos2, color: Color32) {
+    let y = c.y.round() + 0.5;
+    p.line_segment([pos2(c.x - 5.0, y), pos2(c.x + 5.0, y)], Stroke::new(1.0, color));
+}
+
+/// Window button: maximize (a square), or restore (two overlapping squares).
+pub fn draw_maximize_icon(p: &Painter, c: egui::Pos2, color: Color32, maximized: bool) {
+    let st = Stroke::new(1.0, color);
+    let snap = |v: f32| v.round() + 0.5;
+    if maximized {
+        let front = Rect::from_min_size(pos2(snap(c.x - 5.0), snap(c.y - 3.0)), vec2(8.0, 8.0));
+        p.rect_stroke(front, CornerRadius::same(1), st, egui::StrokeKind::Middle);
+        p.add(Shape::line(
+            vec![pos2(front.left() + 2.0, front.top() - 2.0), pos2(front.right() + 2.0, front.top() - 2.0), pos2(front.right() + 2.0, front.bottom() - 2.0)],
+            st,
+        ));
+    } else {
+        let r = Rect::from_min_size(pos2(snap(c.x - 5.0), snap(c.y - 5.0)), vec2(10.0, 10.0));
+        p.rect_stroke(r, CornerRadius::same(1), st, egui::StrokeKind::Middle);
+    }
+}
+
+/// Layout toggle: a window with its left side panel (filled when shown).
+pub fn draw_sidebar_toggle_icon(p: &Painter, c: egui::Pos2, color: Color32, on: bool) {
+    let r = Rect::from_center_size(c, vec2(14.0, 12.0));
+    p.rect_stroke(r, CornerRadius::same(2), Stroke::new(1.1, color), egui::StrokeKind::Inside);
+    let side = Rect::from_min_max(r.min, pos2(r.left() + 5.0, r.bottom()));
+    if on {
+        p.rect_filled(side.shrink(1.0), CornerRadius { nw: 1, sw: 1, ne: 0, se: 0 }, color);
+    } else {
+        p.line_segment([pos2(side.right(), r.top()), pos2(side.right(), r.bottom())], Stroke::new(1.1, color));
+    }
+}
+
+/// Layout toggle: a window with its bottom panel (filled when shown).
+pub fn draw_panel_toggle_icon(p: &Painter, c: egui::Pos2, color: Color32, on: bool) {
+    let r = Rect::from_center_size(c, vec2(14.0, 12.0));
+    p.rect_stroke(r, CornerRadius::same(2), Stroke::new(1.1, color), egui::StrokeKind::Inside);
+    let bottom = Rect::from_min_max(pos2(r.left(), r.bottom() - 5.0), r.max);
+    if on {
+        p.rect_filled(bottom.shrink(1.0), CornerRadius { sw: 1, se: 1, nw: 0, ne: 0 }, color);
+    } else {
+        p.line_segment([pos2(r.left(), bottom.top()), pos2(r.right(), bottom.top())], Stroke::new(1.1, color));
+    }
+}
+
+/// A small magnifier for the title bar's search box.
+pub fn draw_search_icon_small(p: &Painter, c: egui::Pos2, color: Color32) {
+    p.circle_stroke(pos2(c.x + 1.0, c.y - 1.0), 4.0, Stroke::new(1.2, color));
+    p.line_segment([pos2(c.x - 1.8, c.y + 1.8), pos2(c.x - 5.0, c.y + 5.0)], Stroke::new(1.4, color));
+}

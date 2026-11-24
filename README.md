@@ -6,6 +6,8 @@ A fast code editor written in Rust. It looks like VS Code and edits like Vim.
 
 Vex draws its UI on the GPU with [egui](https://github.com/emilk/egui). It has the VS Code layout (activity bar, file explorer, tabs, breadcrumbs, minimap, status bar) in VS Code's Dark Modern and Light Modern colors, with the classic Dark+ and Light+ also available. A modal editing engine is built in from the start.
 
+Vex draws its own title bar, like VS Code: the logo, a search box in the middle (click it to go to a file), buttons to show or hide the sidebar and bottom panel, and the window buttons. Drag it to move the window and double-click it to maximize; the window's edges resize it. To use your system's title bar instead, turn off Settings → Appearance → Title bar (`custom_title_bar = false`) and restart Vex.
+
 ## Download
 
 Prebuilt packages for each release are on the [Releases page](https://github.com/i1288/Vex/releases/latest):
