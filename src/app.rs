@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use eframe::egui::{
     self, pos2, vec2, Align2, Color32, CornerRadius, FontId, Frame, Galley, Key as EKey, Margin, Modifiers,
-    Painter, Rect, Sense, Shape, Stroke, Ui,
+    Painter, Rect, Sense, Stroke, Ui,
 };
 
 use crate::buffer::{self, tab_size, Buffer, Pos};
@@ -31,6 +31,12 @@ use crate::vim::{Action, Key, Mode, Vim};
 const UI_SIZE: f32 = 13.0;
 const TAB_GAP: f32 = 3.0;
 const TAB_RADIUS: u8 = 7;
+
+#[derive(Clone, Copy, PartialEq)]
+enum PanelTab {
+    Problems,
+    Terminal,
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum SidebarView {
@@ -73,7 +79,9 @@ pub struct VexApp {
     /// Text events to drop: their key was already used by position (see `vim_key_positions`).
     skip_text: usize,
     terminal: Option<Terminal>,
+    /// The bottom panel (Problems and Terminal tabs) is open.
     show_terminal: bool,
+    panel_tab: PanelTab,
     terminal_focused: bool,
     /// Wheel movement not yet turned into whole scrollback lines.
     terminal_scroll: f32,
@@ -133,6 +141,7 @@ impl VexApp {
             skip_text: 0,
             terminal: None,
             show_terminal: false,
+            panel_tab: PanelTab::Terminal,
             terminal_focused: false,
             terminal_scroll: 0.0,
             logo,
@@ -439,6 +448,7 @@ impl VexApp {
             Command::ToggleSidebar => self.show_sidebar = !self.show_sidebar,
             Command::FindInFiles => self.show_search(),
             Command::ToggleTerminal => self.toggle_terminal(),
+            Command::ShowProblems => self.toggle_problems(),
             Command::ToggleWrap => {
                 self.settings.word_wrap = !self.settings.word_wrap;
                 self.follow_cursor = true;
@@ -1027,12 +1037,23 @@ impl VexApp {
 
     /// Keys go to the terminal when its panel is open and focused.
     fn terminal_has_keys(&self) -> bool {
-        self.show_terminal && self.terminal_focused && self.terminal.is_some() && !self.overlay_open()
+        self.show_terminal && self.panel_tab == PanelTab::Terminal && self.terminal_focused && self.terminal.is_some() && !self.overlay_open()
+    }
+
+    fn toggle_problems(&mut self) {
+        if self.show_terminal && self.panel_tab == PanelTab::Problems {
+            self.show_terminal = false;
+        } else {
+            self.show_terminal = true;
+            self.panel_tab = PanelTab::Problems;
+        }
+        self.terminal_focused = false;
     }
 
     fn toggle_terminal(&mut self) {
-        if !self.show_terminal {
+        if !self.show_terminal || self.panel_tab != PanelTab::Terminal {
             self.show_terminal = true;
+            self.panel_tab = PanelTab::Terminal;
             self.terminal_focused = true;
         } else if self.terminal_focused {
             self.show_terminal = false;
@@ -1594,20 +1615,14 @@ impl VexApp {
                 painter.rect_filled(r, CornerRadius::same(3), p.list_hover);
             }
             // Error count: a circled x. Warning count: a triangle.
-            let c = pos2(x + 6.0, rect.center().y);
-            painter.circle_stroke(c, 5.5, Stroke::new(1.3, p.error));
-            draw_x(painter, c, 2.3, p.error);
+            draw_error_icon(painter, pos2(x + 6.0, rect.center().y), p.error);
             painter.galley(pos2(x + 16.0, rect.center().y - err_count.size().y / 2.0), err_count, fg);
-            let t = pos2(warn_x, rect.center().y);
-            painter.add(Shape::convex_polygon(
-                vec![pos2(t.x, t.y + 5.0), pos2(t.x + 6.0, t.y - 5.5), pos2(t.x + 12.0, t.y + 5.0)],
-                Color32::TRANSPARENT,
-                Stroke::new(1.3, p.warning),
-            ));
+            draw_warning_icon(painter, pos2(warn_x + 6.0, rect.center().y), p.warning);
             painter.galley(pos2(warn_x + 16.0, rect.center().y - warn_count.size().y / 2.0), warn_count, fg);
             x = r.right() + 12.0;
-            if resp.on_hover_text("Errors and warnings: click, or ]d / [d, to go to the next one").clicked() {
-                self.jump_diagnostic(true);
+            let tip = format!("Problems ({}); ]d / [d go to the next / previous one", self.keys.label(Command::ShowProblems));
+            if resp.on_hover_text(tip).clicked() {
+                self.toggle_problems();
             }
         }
         if let (None, Some((msg, severity))) = (&self.vim.message, cursor_problem) {
@@ -1721,7 +1736,7 @@ impl VexApp {
             let follow = g == self.ws.focus && std::mem::take(&mut self.follow_cursor);
             let center = follow && std::mem::take(&mut self.center_cursor);
             let cursor_visible = self.cursor_blink_on(ui.ctx());
-            let editor_focused = !(self.show_terminal && self.terminal_focused);
+            let editor_focused = !(self.show_terminal && self.panel_tab == PanelTab::Terminal && self.terminal_focused);
             let (vim, settings, drag) = (&mut self.vim, &self.settings, &mut self.drag_anchor);
             let resp = self.ws.with_view(g, |buf, focused| {
                 let focused = focused && editor_focused;
@@ -1754,7 +1769,95 @@ impl VexApp {
         }
     }
 
-    // ---- terminal panel --------------------------------------------------
+    // ---- bottom panel ----------------------------------------------------
+
+    /// Every problem in the open files, by file; clicking one goes there.
+    fn problems_list(&mut self, ui: &mut Ui, body: Rect) {
+        let p = theme::p();
+        // Rows: a file header, then its problems.
+        let mut files: Vec<usize> = (0..self.ws.buffers.len()).filter(|&b| !self.ws.buffers[b].diagnostics.is_empty()).collect();
+        files.sort_by_key(|&b| self.ws.buffers[b].name());
+        let rows: Vec<(usize, Option<usize>)> = files
+            .iter()
+            .flat_map(|&b| std::iter::once((b, None)).chain((0..self.ws.buffers[b].diagnostics.len()).map(move |d| (b, Some(d)))))
+            .collect();
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body.shrink2(vec2(8.0, 2.0))));
+        if rows.is_empty() {
+            child.add_space(8.0);
+            child.horizontal(|ui| {
+                ui.add_space(12.0);
+                ui.label(egui::RichText::new("No problems have been detected in the open files.").size(12.5).color(p.text_muted));
+            });
+            return;
+        }
+        let mut jump = None;
+        const ROW_H: f32 = 22.0;
+        egui::ScrollArea::vertical().id_salt("problems").auto_shrink(false).show_rows(&mut child, ROW_H, rows.len(), |ui, range| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for &(b, d) in &rows[range] {
+                let buf = &self.ws.buffers[b];
+                let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
+                let painter = ui.painter();
+                if resp.hovered() {
+                    painter.rect_filled(r, CornerRadius::same(5), p.list_hover);
+                }
+                let y = r.center().y;
+                match d {
+                    None => {
+                        let name = buf.name();
+                        draw_chevron(painter, pos2(r.left() + 10.0, y), true, p.text_muted);
+                        draw_file_icon(painter, pos2(r.left() + 26.0, y), theme::file_color(&name));
+                        let nr = painter.text(pos2(r.left() + 38.0, y), Align2::LEFT_CENTER, &name, FontId::proportional(13.0), p.text_bright);
+                        let mut x = nr.right() + 8.0;
+                        if let Some(dir) = buf.path.as_ref().and_then(|p| p.parent()) {
+                            let dir = dir.strip_prefix(&self.explorer.root).unwrap_or(dir);
+                            if !dir.as_os_str().is_empty() {
+                                let dr = painter.text(pos2(x, y), Align2::LEFT_CENTER, dir.display(), FontId::proportional(12.0), p.text_muted);
+                                x = dr.right() + 8.0;
+                            }
+                        }
+                        let g = painter.layout_no_wrap(buf.diagnostics.len().to_string(), FontId::proportional(10.5), p.text_bright);
+                        let pill = Rect::from_min_size(pos2(x, y - 8.0), vec2((g.size().x + 10.0).max(16.0), 16.0));
+                        painter.rect_filled(pill, CornerRadius::same(8), p.input_bg);
+                        painter.galley(pill.center() - g.size() / 2.0, g, p.text_bright);
+                    }
+                    Some(i) => {
+                        let diag = &buf.diagnostics[i];
+                        let c = pos2(r.left() + 40.0, y);
+                        let color = theme::severity_color(&p, diag.severity);
+                        match diag.severity {
+                            Severity::Error => draw_error_icon(painter, c, color),
+                            Severity::Warning => draw_warning_icon(painter, c, color),
+                            Severity::Info => draw_info_icon(painter, c, color),
+                        }
+                        let msg = diag.message.lines().next().unwrap_or("");
+                        let where_ = format!("[Ln {}, Col {}]", diag.start.line + 1, diag.start.col + 1);
+                        let wg = painter.layout_no_wrap(where_, FontId::proportional(12.0), p.text_muted);
+                        let mg = painter.layout_no_wrap(msg.to_string(), FontId::proportional(13.0), p.text_ui);
+                        let x = r.left() + 54.0;
+                        let max_msg = (r.right() - x - wg.size().x - 16.0).max(40.0);
+                        let clip = Rect::from_min_max(pos2(x, r.top()), pos2(x + max_msg, r.bottom()));
+                        let msg_w = mg.size().x.min(max_msg);
+                        let cut_off = mg.size().x > max_msg;
+                        painter.with_clip_rect(clip).galley(pos2(x, y - mg.size().y / 2.0), mg, p.text_ui);
+                        painter.galley(pos2(x + msg_w + 8.0, y - wg.size().y / 2.0), wg, p.text_muted);
+                        let resp = if diag.message.contains('\n') || cut_off {
+                            resp.on_hover_text(diag.message.clone())
+                        } else {
+                            resp
+                        };
+                        if resp.clicked() {
+                            jump = Some((buf.path.clone(), diag.start));
+                        }
+                    }
+                }
+            }
+        });
+        if let Some((Some(path), pos)) = jump {
+            self.open_at(&path, pos.line, pos.col);
+        }
+    }
+
 
     fn terminal_panel(&mut self, ui: &mut Ui) {
         let rect = ui.max_rect();
@@ -1764,40 +1867,78 @@ impl VexApp {
         let painter = ui.painter_at(rect);
         painter.line_segment([rect.left_top(), rect.right_top()], Stroke::new(1.0, p.border));
 
-        // Header: the TERMINAL tab plus kill and close buttons, like VS Code's panel.
+        // Header: the PROBLEMS and TERMINAL tabs, then the panel's buttons.
         let header = Rect::from_min_size(rect.min, vec2(rect.width(), 35.0));
-        let title = painter.text(
-            pos2(header.left() + 20.0, header.center().y),
-            Align2::LEFT_CENTER,
-            "TERMINAL",
-            FontId::proportional(11.0),
-            p.text_bright,
-        );
-        let underline = Rect::from_min_max(pos2(title.left(), title.bottom() + 5.0), pos2(title.right(), title.bottom() + 7.0));
-        painter.rect_filled(underline, CornerRadius::same(1), if self.terminal_focused { p.accent } else { p.text_muted });
-        if let Some(t) = &self.terminal {
-            painter.text(pos2(title.right() + 16.0, header.center().y), Align2::LEFT_CENTER, &t.name, FontId::proportional(12.0), p.text_muted);
+        let (errors, warnings) = self.ws.buffers.iter().flat_map(|b| &b.diagnostics).fold((0, 0), |(e, w), d| {
+            if d.severity == Severity::Error { (e + 1, w) } else { (e, w + 1) }
+        });
+        let mut x = header.left() + 20.0;
+        let mut switch = None;
+        for (tab, label) in [(PanelTab::Problems, "PROBLEMS"), (PanelTab::Terminal, "TERMINAL")] {
+            let active = self.panel_tab == tab;
+            let color = if active { p.text_bright } else { p.text_muted };
+            let title = painter.text(pos2(x, header.center().y), Align2::LEFT_CENTER, label, FontId::proportional(11.0), color);
+            let mut right = title.right();
+            // The problem count, as a small pill.
+            if tab == PanelTab::Problems && errors + warnings > 0 {
+                let g = painter.layout_no_wrap((errors + warnings).to_string(), FontId::proportional(10.5), p.text_bright);
+                let pill = Rect::from_min_size(pos2(right + 6.0, header.center().y - 8.0), vec2((g.size().x + 10.0).max(16.0), 16.0));
+                painter.rect_filled(pill, CornerRadius::same(8), p.input_bg);
+                painter.galley(pill.center() - g.size() / 2.0, g, p.text_bright);
+                right = pill.right();
+            }
+            let hit = Rect::from_min_max(pos2(title.left() - 6.0, header.top() + 4.0), pos2(right + 6.0, header.bottom() - 4.0));
+            let resp = ui.interact(hit, ui.scope_id().with(("panel-tab", label)), Sense::click());
+            if resp.hovered() && !active {
+                painter.text(title.left_center(), Align2::LEFT_CENTER, label, FontId::proportional(11.0), p.text_ui);
+            }
+            if active {
+                let focused = tab == PanelTab::Problems || self.terminal_focused;
+                let underline = Rect::from_min_max(pos2(title.left(), title.bottom() + 5.0), pos2(right, title.bottom() + 7.0));
+                painter.rect_filled(underline, CornerRadius::same(1), if focused { p.accent } else { p.text_muted });
+            }
+            if resp.clicked() {
+                switch = Some(tab);
+            }
+            x = right + 24.0;
         }
+        if let Some(tab) = switch {
+            self.panel_tab = tab;
+            self.terminal_focused = tab == PanelTab::Terminal;
+        }
+        let on_terminal = self.panel_tab == PanelTab::Terminal;
         let close = Rect::from_center_size(pos2(header.right() - 22.0, header.center().y), vec2(22.0, 22.0));
         let kill = Rect::from_center_size(pos2(header.right() - 50.0, header.center().y), vec2(22.0, 22.0));
+        if on_terminal {
+            if let Some(t) = &self.terminal {
+                painter.text(pos2(kill.left() - 10.0, header.center().y), Align2::RIGHT_CENTER, &t.name, FontId::proportional(12.0), p.text_muted);
+            }
+        }
         let close_resp = ui.interact(close, ui.scope_id().with("term-close"), Sense::click());
-        let kill_resp = ui.interact(kill, ui.scope_id().with("term-kill"), Sense::click());
-        for (r, resp) in [(close, &close_resp), (kill, &kill_resp)] {
-            if resp.hovered() {
+        let kill_resp = on_terminal.then(|| ui.interact(kill, ui.scope_id().with("term-kill"), Sense::click()));
+        for (r, resp) in [(close, Some(&close_resp)), (kill, kill_resp.as_ref())] {
+            if resp.is_some_and(|r| r.hovered()) {
                 painter.rect_filled(r, CornerRadius::same(4), p.list_hover);
             }
         }
         draw_x(&painter, close.center(), 4.5, p.text_ui);
-        draw_trash_icon(&painter, kill.center(), p.text_ui);
-        if close_resp.on_hover_text("Hide Panel (Ctrl+`)").clicked() {
+        if on_terminal {
+            draw_trash_icon(&painter, kill.center(), p.text_ui);
+        }
+        if close_resp.on_hover_text(format!("Hide Panel ({})", self.keys.label(Command::ToggleTerminal))).clicked() {
             self.show_terminal = false;
             self.terminal_focused = false;
             return;
         }
-        if kill_resp.on_hover_text("Kill Terminal").clicked() {
+        if kill_resp.is_some_and(|r| r.on_hover_text("Kill Terminal").clicked()) {
             self.terminal = None;
             self.show_terminal = false;
             self.terminal_focused = false;
+            return;
+        }
+        if !on_terminal {
+            let body = Rect::from_min_max(pos2(rect.left(), header.bottom()), rect.max);
+            self.problems_list(ui, body);
             return;
         }
 

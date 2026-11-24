@@ -37,6 +37,7 @@ pub enum Command {
     OpenSettings,
     Keybindings,
     FindInFiles,
+    ShowProblems,
     FocusPane(u8),
 }
 
@@ -68,6 +69,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     info(Command::ToggleSidebar, "toggle_sidebar", "Toggle Sidebar", &["Cmd+B"], true),
     info(Command::FindInFiles, "find_in_files", "Search in Files", &["Cmd+Shift+F"], true),
     info(Command::ToggleTerminal, "toggle_terminal", "Toggle Terminal", &["Ctrl+`"], true),
+    info(Command::ShowProblems, "show_problems", "Show Problems", &["Cmd+Shift+M"], true),
     info(Command::ToggleWrap, "toggle_wrap", "Toggle Word Wrap", &["Alt+Z"], false),
     info(Command::ToggleMinimap, "toggle_minimap", "Toggle Minimap", &[], false),
     info(Command::SplitEditor, "split_editor", "Split Editor", &["Cmd+\\"], false),

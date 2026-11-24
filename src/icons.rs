@@ -258,3 +258,25 @@ pub fn draw_branch_icon(p: &Painter, c: egui::Pos2, color: Color32) {
     let bend = pos2(side.x, c.y - 0.5);
     p.add(Shape::line(vec![side + vec2(0.0, r), bend, pos2(top.x + 0.5, c.y + 2.5)], st));
 }
+
+/// A circled x: errors.
+pub fn draw_error_icon(p: &Painter, c: egui::Pos2, color: Color32) {
+    p.circle_stroke(c, 5.5, Stroke::new(1.3, color));
+    draw_x(p, c, 2.3, color);
+}
+
+/// A triangle: warnings.
+pub fn draw_warning_icon(p: &Painter, c: egui::Pos2, color: Color32) {
+    p.add(Shape::convex_polygon(
+        vec![pos2(c.x - 6.0, c.y + 5.0), pos2(c.x, c.y - 5.5), pos2(c.x + 6.0, c.y + 5.0)],
+        Color32::TRANSPARENT,
+        Stroke::new(1.3, color),
+    ));
+}
+
+/// A circled i: information.
+pub fn draw_info_icon(p: &Painter, c: egui::Pos2, color: Color32) {
+    p.circle_stroke(c, 5.5, Stroke::new(1.3, color));
+    p.line_segment([pos2(c.x, c.y - 0.5), pos2(c.x, c.y + 3.0)], Stroke::new(1.4, color));
+    p.circle_filled(pos2(c.x, c.y - 2.8), 0.9, color);
+}
