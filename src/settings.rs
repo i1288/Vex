@@ -33,6 +33,10 @@ pub struct Settings {
     pub line_numbers: bool,
     pub relative_line_numbers: bool,
     pub indent_guides: bool,
+    /// Highlight the bracket matching the one at the cursor.
+    pub bracket_matching: bool,
+    /// Typing an opening bracket or quote adds the closing one.
+    pub auto_close_brackets: bool,
     pub highlight_current_line: bool,
     pub render_whitespace: String,
     pub breadcrumbs: bool,
@@ -79,6 +83,8 @@ impl Default for Settings {
             line_numbers: true,
             relative_line_numbers: false,
             indent_guides: true,
+            bracket_matching: true,
+            auto_close_brackets: true,
             highlight_current_line: true,
             render_whitespace: "none".into(),
             breadcrumbs: true,
@@ -171,6 +177,7 @@ impl Settings {
     /// Returns warnings, such as an unknown theme or color name.
     pub fn apply_globals(&self) -> Vec<String> {
         buffer::set_indent(self.tab_size, self.insert_spaces);
+        crate::vim::set_auto_pairs(self.auto_close_brackets);
         theme::activate(&self.theme, &self.colors)
     }
 
@@ -207,6 +214,8 @@ impl Settings {
             ("Show line numbers", format!("line_numbers = {}", b(self.line_numbers))),
             ("Number lines relative to the cursor", format!("relative_line_numbers = {}", b(self.relative_line_numbers))),
             ("Vertical lines at each indent level", format!("indent_guides = {}", b(self.indent_guides))),
+            ("Highlight the bracket matching the one at the cursor", format!("bracket_matching = {}", b(self.bracket_matching))),
+            ("Typing ( [ { or a quote adds the closing one", format!("auto_close_brackets = {}", b(self.auto_close_brackets))),
             ("Outline the line the cursor is on", format!("highlight_current_line = {}", b(self.highlight_current_line))),
             ("Show spaces and tabs: none, boundary (leading/trailing) or all", format!("render_whitespace = {}", quote(&self.render_whitespace))),
             ("Show the file path above the editor", format!("breadcrumbs = {}", b(self.breadcrumbs))),
@@ -315,6 +324,8 @@ impl Settings {
             "wrap" => &mut self.word_wrap,
             "minimap" | "mm" => &mut self.minimap,
             "indentguides" | "ig" => &mut self.indent_guides,
+            "matchbrackets" | "mb" => &mut self.bracket_matching,
+            "autopairs" | "ap" => &mut self.auto_close_brackets,
             "cursorline" | "cul" => &mut self.highlight_current_line,
             "cursorblink" => &mut self.cursor_blink,
             "breadcrumbs" => &mut self.breadcrumbs,

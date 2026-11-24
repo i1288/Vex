@@ -407,6 +407,11 @@ fn editor(ui: &mut Ui, rows: &mut Rows, st: &mut Settings) -> bool {
         a || b
     });
     changed |= rows.row(ui, "Indent guides", "Thin vertical lines at each indentation level.", |ui| ui.checkbox(&mut st.indent_guides, "Show indent guides").changed());
+    changed |= rows.row(ui, "Brackets", "Highlight matching brackets, and close brackets and quotes as you type them.", |ui| {
+        let a = ui.checkbox(&mut st.bracket_matching, "Highlight the matching bracket").changed();
+        let b = ui.checkbox(&mut st.auto_close_brackets, "Auto-close brackets and quotes").changed();
+        a || b
+    });
     changed |= rows.row(ui, "Highlight current line", "Outline the line the cursor is on.", |ui| {
         ui.checkbox(&mut st.highlight_current_line, "Highlight").changed()
     });

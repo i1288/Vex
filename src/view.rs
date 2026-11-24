@@ -240,6 +240,7 @@ impl View<'_> {
 
         let row_y = |r: usize| rect.top() + r as f32 * line_h - scroll_y;
         let cur_line_number = buf.cursor.line;
+        let brackets = if st.bracket_matching && focused { vim::bracket_pair(buf, buf.cursor, mode == Mode::Insert) } else { None };
         let mut l = first_line;
         while l < buf.line_count() && row_of_line[l] <= last_row {
             let line = &buf.lines[l];
@@ -283,6 +284,13 @@ impl View<'_> {
                         let r = Rect::from_x_y_ranges(x_of(lo)..=x_of(hi), y + 1.0..=y + line_h - 1.0);
                         text_painter.rect_filled(r, 2.0, p.search_match);
                         text_painter.rect_stroke(r, 2.0, Stroke::new(1.0, p.search_border), egui::StrokeKind::Inside);
+                    }
+                }
+                // The bracket at the cursor and its partner, boxed.
+                for bp in brackets.into_iter().flat_map(|(a, b)| [a, b]) {
+                    if bp.line == l && bp.col >= s && bp.col < e {
+                        let r = Rect::from_x_y_ranges(x_of(bp.col)..=x_of(bp.col + 1), y + 1.0..=y + line_h - 1.0);
+                        text_painter.rect(r, 2.0, p.text_muted.gamma_multiply(0.18), Stroke::new(1.0, p.text_muted.gamma_multiply(0.8)), egui::StrokeKind::Inside);
                     }
                 }
                 for k in 0..indent / tab_size() {
